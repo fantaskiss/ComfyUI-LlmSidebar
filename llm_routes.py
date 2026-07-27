@@ -175,6 +175,35 @@ def register_routes(prompt_server, llm_module):
         except Exception as e:
             return web.json_response({"success": False, "error": str(e)}, status=500)
 
+    # ---- POST /llm-sidebar/apply-settings ----
+    @prompt_server.routes.post("/llm-sidebar/apply-settings")
+    async def apply_settings_handler(request):
+        """Explicitly unload and reload with new settings from Setup tab."""
+        try:
+            data = await request.json()
+            model = data.get("model", "")
+            if not model:
+                return web.json_response(
+                    {"success": False, "error": "model required"}, status=400)
+
+            _llm.apply_settings(
+                model=model,
+                chat_handler=data.get("chat_handler", "None"),
+                mmproj=data.get("mmproj", "None"),
+                n_ctx=int(data.get("n_ctx", 8192)),
+                vram_limit=int(data.get("vram_limit", -1)),
+                image_min_tokens=int(data.get("image_min_tokens", 1024)),
+                image_max_tokens=int(data.get("image_max_tokens", 4096)),
+                n_gpu_layers=int(data.get("n_gpu_layers", -1)),
+                cache_type_k=str(data.get("cache_type_k", "default")),
+                cache_type_v=str(data.get("cache_type_v", "default")),
+                n_cpu_moe=int(data.get("n_cpu_moe", 0)),
+                n_seq_max=int(data.get("n_seq_max", 1)),
+            )
+            return web.json_response({"success": True, "data": {"loaded": True}})
+        except Exception as e:
+            _log.exception("apply-settings error")
+            return web.json_response({"success": False, "error": str(e)}, status=500)
 
     # ---- GET /llm-sidebar/diag ----
     @prompt_server.routes.get("/llm-sidebar/diag")

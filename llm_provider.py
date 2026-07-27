@@ -167,7 +167,12 @@ def scan_vision_models() -> list[str]:
 def _build_config(model: str, *, chat_handler: str = "None",
                   mmproj: str = "None", n_ctx: int = _DEFAULT_N_CTX,
                   vram_limit: int = -1, image_min_tokens: int = 0,
-                  image_max_tokens: int = 0) -> dict:
+                  image_max_tokens: int = 0,
+                  n_gpu_layers: int = -1,
+                  cache_type_k: str = "default",
+                  cache_type_v: str = "default",
+                  n_cpu_moe: int = 0,
+                  n_seq_max: int = 1) -> dict:
     return {
         "model": model,
         "mmproj": mmproj,
@@ -176,6 +181,11 @@ def _build_config(model: str, *, chat_handler: str = "None",
         "vram_limit": vram_limit,
         "image_min_tokens": image_min_tokens,
         "image_max_tokens": image_max_tokens,
+        "n_gpu_layers": n_gpu_layers,
+        "cache_type_k": cache_type_k,
+        "cache_type_v": cache_type_v,
+        "n_cpu_moe": n_cpu_moe,
+        "n_seq_max": n_seq_max,
     }
 
 # Qwen-VL models require at minimum 1024 image tokens (llama.cpp #16842).
@@ -188,25 +198,79 @@ _DEFAULT_IMAGE_MAX_TOKENS = 4096
 def _ensure_model(model: str, *, chat_handler: str = "None",
                   mmproj: str = "None", n_ctx: int = _DEFAULT_N_CTX,
                   vram_limit: int = -1, image_min_tokens: int = _DEFAULT_IMAGE_MIN_TOKENS,
-                  image_max_tokens: int = _DEFAULT_IMAGE_MAX_TOKENS):
-    """Load model via LLAMA_CPP_STORAGE if not already loaded with same config."""
+                  image_max_tokens: int = _DEFAULT_IMAGE_MAX_TOKENS,
+                  n_gpu_layers: int = -1,
+                  cache_type_k: str = "default",
+                  cache_type_v: str = "default",
+                  n_cpu_moe: int = 0,
+                  n_seq_max: int = 1):
+    """Load model via LLAMA_CPP_STORAGE.
+
+    If a model is already loaded (by workflow node or previous sidebar call),
+    reuse it AS-IS -- no config comparison, no reload. This prevents the
+    infinite reload loop when sidebar and workflow node have different settings.
+
+    Only when no model is loaded, use sidebar's own settings to load.
+    """
     storage = _get_storage()
+
+    # Model already loaded -- reuse without config comparison
+    if storage.llm is not None:
+        return storage.llm
+
+    # Model not loaded -- use sidebar's own settings
     config = _build_config(model, chat_handler=chat_handler, mmproj=mmproj,
                            n_ctx=n_ctx, vram_limit=vram_limit,
                            image_min_tokens=image_min_tokens,
-                           image_max_tokens=image_max_tokens)
-    if storage.llm is None or storage.current_config != config:
-        # Save sidebar history before reload (load_model cleans all state)
-        sidebar_history = storage.messages.pop(_SIDEBAR_UID, [])
-        sidebar_sys = storage.sys_prompts.pop(_SIDEBAR_UID, "")
-        _log.info("Loading model via LLAMA_CPP_STORAGE: %s (handler=%s, mmproj=%s, ctx=%d, img_min=%d, img_max=%d)",
-                  model, chat_handler, mmproj, n_ctx, image_min_tokens, image_max_tokens)
-        storage.load_model(config)
-        # Restore sidebar history after reload
-        if sidebar_history:
-            storage.messages[_SIDEBAR_UID] = sidebar_history
-            storage.sys_prompts[_SIDEBAR_UID] = sidebar_sys
+                           image_max_tokens=image_max_tokens,
+                           n_gpu_layers=n_gpu_layers,
+                           cache_type_k=cache_type_k,
+                           cache_type_v=cache_type_v,
+                           n_cpu_moe=n_cpu_moe,
+                           n_seq_max=n_seq_max)
+    _log.info("Loading model via LLAMA_CPP_STORAGE: %s (handler=%s, mmproj=%s, ctx=%d, gpu_layers=%d, kv_k=%s, kv_v=%s)",
+              model, chat_handler, mmproj, n_ctx, n_gpu_layers, cache_type_k, cache_type_v)
+    storage.load_model(config)
     return storage.llm
+
+
+def apply_settings(model: str, *, chat_handler: str = "None",
+                   mmproj: str = "None", n_ctx: int = _DEFAULT_N_CTX,
+                   vram_limit: int = -1, image_min_tokens: int = _DEFAULT_IMAGE_MIN_TOKENS,
+                   image_max_tokens: int = _DEFAULT_IMAGE_MAX_TOKENS,
+                   n_gpu_layers: int = -1,
+                   cache_type_k: str = "default",
+                   cache_type_v: str = "default",
+                   n_cpu_moe: int = 0,
+                   n_seq_max: int = 1):
+    """Explicitly unload and reload with new settings. Used by Setup panel."""
+    storage = _get_storage()
+
+    # Save sidebar state before clean
+    sidebar_history = storage.messages.pop(_SIDEBAR_UID, [])
+    sidebar_sys = storage.sys_prompts.pop(_SIDEBAR_UID, "")
+
+    storage.clean(all=True)
+
+    config = _build_config(model, chat_handler=chat_handler, mmproj=mmproj,
+                           n_ctx=n_ctx, vram_limit=vram_limit,
+                           image_min_tokens=image_min_tokens,
+                           image_max_tokens=image_max_tokens,
+                           n_gpu_layers=n_gpu_layers,
+                           cache_type_k=cache_type_k,
+                           cache_type_v=cache_type_v,
+                           n_cpu_moe=n_cpu_moe,
+                           n_seq_max=n_seq_max)
+    _log.info("Applying settings + reloading: %s (handler=%s, ctx=%d, gpu_layers=%d)",
+              model, chat_handler, n_ctx, n_gpu_layers)
+    storage.load_model(config)
+
+    # Restore sidebar state
+    if sidebar_history:
+        storage.messages[_SIDEBAR_UID] = sidebar_history
+        storage.sys_prompts[_SIDEBAR_UID] = sidebar_sys
+
+    return True
 
 def unload_model():
     """Unload via LLAMA_CPP_STORAGE."""
@@ -255,10 +319,20 @@ def chat(model: str, prompt: str, *,
     vram_limit = int(opts.pop("vram_limit", -1))
     image_min = int(opts.pop("image_min_tokens", _DEFAULT_IMAGE_MIN_TOKENS))
     image_max = int(opts.pop("image_max_tokens", _DEFAULT_IMAGE_MAX_TOKENS))
+    n_gpu_layers = int(opts.pop("n_gpu_layers", -1))
+    cache_type_k = str(opts.pop("cache_type_k", "default"))
+    cache_type_v = str(opts.pop("cache_type_v", "default"))
+    n_cpu_moe = int(opts.pop("n_cpu_moe", 0))
+    n_seq_max = int(opts.pop("n_seq_max", 1))
 
     llm = _ensure_model(model, chat_handler=chat_handler, mmproj=mmproj,
                         n_ctx=n_ctx_val, vram_limit=vram_limit,
-                        image_min_tokens=image_min, image_max_tokens=image_max)
+                        image_min_tokens=image_min, image_max_tokens=image_max,
+                        n_gpu_layers=n_gpu_layers,
+                        cache_type_k=cache_type_k,
+                        cache_type_v=cache_type_v,
+                        n_cpu_moe=n_cpu_moe,
+                        n_seq_max=n_seq_max)
     llama_opts = _build_options(opts)
 
     storage = _get_storage()
@@ -352,10 +426,20 @@ def vision(model: str, prompt: str, images, *,
     vram_limit = int(opts.pop("vram_limit", -1))
     image_min = int(opts.pop("image_min_tokens", _DEFAULT_IMAGE_MIN_TOKENS))
     image_max = int(opts.pop("image_max_tokens", _DEFAULT_IMAGE_MAX_TOKENS))
+    n_gpu_layers = int(opts.pop("n_gpu_layers", -1))
+    cache_type_k = str(opts.pop("cache_type_k", "default"))
+    cache_type_v = str(opts.pop("cache_type_v", "default"))
+    n_cpu_moe = int(opts.pop("n_cpu_moe", 0))
+    n_seq_max = int(opts.pop("n_seq_max", 1))
 
     llm = _ensure_model(model, chat_handler=chat_handler, mmproj=mmproj,
                         n_ctx=n_ctx_val, vram_limit=vram_limit,
-                        image_min_tokens=image_min, image_max_tokens=image_max)
+                        image_min_tokens=image_min, image_max_tokens=image_max,
+                        n_gpu_layers=n_gpu_layers,
+                        cache_type_k=cache_type_k,
+                        cache_type_v=cache_type_v,
+                        n_cpu_moe=n_cpu_moe,
+                        n_seq_max=n_seq_max)
     llama_opts = _build_options(opts)
 
     encoded = []
@@ -406,10 +490,12 @@ def get_status() -> dict:
 
     text_models = scan_text_models()
     vision_models = scan_vision_models()
+    cfg = storage.current_config
     return {
         "loaded": storage.llm is not None,
-        "loaded_model": storage.current_config.get("model") if storage.current_config else None,
-        "loaded_handler": storage.current_config.get("chat_handler") if storage.current_config else None,
+        "loaded_model": cfg.get("model") if cfg else None,
+        "loaded_handler": cfg.get("chat_handler") if cfg else None,
+        "current_config": dict(cfg) if cfg else None,
         "text_models": text_models,
         "vision_models": vision_models,
         "mmproj_files": scan_mmproj_files(),

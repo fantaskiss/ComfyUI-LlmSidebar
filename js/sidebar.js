@@ -1,7 +1,13 @@
 /**
  * ComfyUI-LlmSidebar - sidebar.js
- * Self-contained floating panel with Chat + Describe tabs.
+ * Self-contained floating panel with Chat + Describe + SysPrompt + Setup tabs.
  * Reuses LLAMA_CPP_STORAGE from ComfyUI-llama-cpp_vlm for model loading.
+ *
+ * Key behavior:
+ * - If model is ALREADY loaded (by workflow node or previously), sidebar
+ *   reuses it without config comparison. No accidental reloads.
+ * - Setup tab sets the load params used when NO model is loaded yet.
+ * - "Apply & Reload" button in Setup tab force-reloads with new params.
  */
 
 import { app } from "../../../scripts/app.js";
@@ -12,19 +18,29 @@ let panel = null;
 let visible = false;
 let activeTab = "chat";
 let selectedModel = "";
-let selectedMmproj = "";  // "None" = no mmproj, "" = auto (not used in path A)
+let selectedMmproj = "";  // "None" = no mmproj, "" = auto
 let selectedHandler = "None";
 let chatHistory = [];
 let describeText = "";
 let systemPrompt = "";
 let systemPromptEnabled = true;
-// Inference params
-let nCtx = 8192;
+// Inference params (SysPrompt tab)
 let maxTokens = 300;
 let temperature = "";
 let topP = "";
 let topK = "";
 let repeatPenalty = "";
+// Load params (Setup tab)
+let nCtx = 8192;
+let nGpuLayers = -1;
+let vramLimit = -1;
+let cacheTypeK = "default";
+let cacheTypeV = "default";
+let nCpuMoe = 0;
+let nSeqMax = 1;
+let imageMinTokens = 1024;
+let imageMaxTokens = 4096;
+
 let allModels = [];
 let allMmproj = [];
 let allHandlers = ["None"];
@@ -48,12 +64,21 @@ function loadState() {
             describeText = s.describeText || "";
             systemPrompt = s.systemPrompt || "";
             systemPromptEnabled = s.systemPromptEnabled !== false;
-            nCtx = s.nCtx || 8192;
             maxTokens = s.maxTokens || 300;
             temperature = s.temperature || "";
             topP = s.topP || "";
             topK = s.topK || "";
             repeatPenalty = s.repeatPenalty || "";
+            // Load params
+            nCtx = s.nCtx || 8192;
+            nGpuLayers = s.nGpuLayers != null ? s.nGpuLayers : -1;
+            vramLimit = s.vramLimit != null ? s.vramLimit : -1;
+            cacheTypeK = s.cacheTypeK || "default";
+            cacheTypeV = s.cacheTypeV || "default";
+            nCpuMoe = s.nCpuMoe != null ? s.nCpuMoe : 0;
+            nSeqMax = s.nSeqMax || 1;
+            imageMinTokens = s.imageMinTokens || 1024;
+            imageMaxTokens = s.imageMaxTokens || 4096;
         }
     } catch (e) {}
 }
@@ -68,8 +93,12 @@ function saveState() {
             describeText,
             systemPrompt,
             systemPromptEnabled,
-            nCtx, maxTokens,
+            maxTokens,
             temperature, topP, topK, repeatPenalty,
+            nCtx, nGpuLayers, vramLimit,
+            cacheTypeK, cacheTypeV,
+            nCpuMoe, nSeqMax,
+            imageMinTokens, imageMaxTokens,
         }));
     } catch (e) {}
 }
@@ -103,9 +132,10 @@ function createPanel() {
 
     panel.innerHTML = `
     <div id="llm-tabs" style="display:flex;border-bottom:1px solid var(--border-color,#333);flex-shrink:0">
-      <button id="llm-tab-chat" class="llm-tab active" style="flex:1;padding:10px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:14px">💬 Chat</button>
-      <button id="llm-tab-desc" class="llm-tab" style="flex:1;padding:10px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:14px">📝 Describe</button>
-      <button id="llm-tab-sys" class="llm-tab" style="flex:1;padding:10px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:14px">⚙️ SysPrompt</button>
+      <button id="llm-tab-chat" class="llm-tab active" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">💬 Chat</button>
+      <button id="llm-tab-desc" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">📝 Desc</button>
+      <button id="llm-tab-sys" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">⚙️ Sys</button>
+      <button id="llm-tab-setup" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">🔧 Setup</button>
       <button id="llm-close" style="padding:10px 14px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:16px">✕</button>
     </div>
 
@@ -152,12 +182,48 @@ function createPanel() {
       </div>
       <textarea id="llm-sys-textarea" placeholder="System prompt (sent at start of each conversation)&#10;Example: You are a helpful creative assistant specialized in image prompt engineering." style="flex:1;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:none;padding:10px;resize:none;font-size:12px;font-family:inherit;min-height:0"></textarea>
       <div id="llm-sys-params" style="padding:6px 10px;border-top:1px solid var(--border-color,#333);flex-shrink:0;display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:11px">
-        <div><label style="color:#888">context</label><input id="llm-param-ctx" type="number" min="512" max="32768" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px"></div>
         <div><label style="color:#888">max_tokens</label><input id="llm-param-tokens" type="number" min="1" max="4096" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px"></div>
         <div><label style="color:#888">temperature</label><input id="llm-param-temp" type="number" step="0.01" min="0" max="2" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
         <div><label style="color:#888">top_p</label><input id="llm-param-topp" type="number" step="0.01" min="0" max="1" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
         <div><label style="color:#888">top_k</label><input id="llm-param-topk" type="number" min="0" max="200" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
         <div><label style="color:#888">repeat_penalty</label><input id="llm-param-repp" type="number" step="0.01" min="1" max="2" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
+      </div>
+    </div>
+
+    <!-- Setup tab (model loading parameters) -->
+    <div id="llm-setup-panel" style="display:none;flex-direction:column;flex:1;min-height:0;overflow-y:auto">
+      <div style="padding:8px 10px;font-size:11px;color:#888;border-bottom:1px solid var(--border-color,#333);flex-shrink:0">
+        Model loading parameters. Used when no model is loaded yet.<br>
+        After a model is loaded by a workflow node, sidebar reuses it as-is.
+      </div>
+      <div id="llm-setup-params" style="padding:6px 10px;display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:11px;flex-shrink:0">
+        <div><label style="color:#888">context (n_ctx)</label><input id="llm-setup-ctx" type="number" min="512" max="327680" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px"></div>
+        <div><label style="color:#888">n_gpu_layers</label><input id="llm-setup-gpu" type="number" min="-1" max="1024" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="-1 = auto/all layers. Overrides vram_limit calculation."></div>
+        <div><label style="color:#888">vram_limit (GB)</label><input id="llm-setup-vram" type="number" min="-1" max="1024" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="-1 = no limit"></div>
+        <div><label style="color:#888">n_cpu_moe</label><input id="llm-setup-cpu-moe" type="number" min="0" max="512" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Keep MoE expert weights on CPU. For Qwen3.6-35B try 34."></div>
+        <div><label style="color:#888">cache_type_k</label><select id="llm-setup-ctk" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px">
+          <option value="default">default</option>
+          <option value="f16">f16</option>
+          <option value="q8_0">q8_0</option>
+          <option value="q4_0">q4_0</option>
+          <option value="q5_0">q5_0</option>
+        </select></div>
+        <div><label style="color:#888">cache_type_v</label><select id="llm-setup-ctv" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px">
+          <option value="default">default</option>
+          <option value="f16">f16</option>
+          <option value="q8_0">q8_0</option>
+          <option value="q4_0">q4_0</option>
+          <option value="q5_0">q5_0</option>
+        </select></div>
+        <div><label style="color:#888">n_seq_max</label><input id="llm-setup-seq" type="number" min="1" max="32" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Max parallel sequences for batched VLM."></div>
+        <div><label style="color:#888">image_min_tokens</label><input id="llm-setup-img-min" type="number" min="0" max="4096" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Minimum image tokens. 1024 recommended for Qwen-VL."></div>
+        <div><label style="color:#888">image_max_tokens</label><input id="llm-setup-img-max" type="number" min="0" max="4096" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Maximum image tokens. 4096 recommended for Qwen-VL."></div>
+      </div>
+      <div id="llm-setup-status" style="padding:8px 10px;font-size:11px;border-top:1px solid var(--border-color,#333);flex-shrink:0">
+        <span id="llm-setup-loaded" style="color:#888">No model loaded</span>
+      </div>
+      <div style="padding:8px 10px;flex-shrink:0">
+        <button id="llm-setup-apply" style="width:100%;padding:8px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">Apply &amp; Reload</button>
       </div>
     </div>
     `;
@@ -171,6 +237,7 @@ function bindEvents() {
     panel.querySelector("#llm-tab-chat").onclick = () => switchTab("chat");
     panel.querySelector("#llm-tab-desc").onclick = () => switchTab("desc");
     panel.querySelector("#llm-tab-sys").onclick = () => switchTab("sys");
+    panel.querySelector("#llm-tab-setup").onclick = () => switchTab("setup");
     panel.querySelector("#llm-close").onclick = togglePanel;
 
     // Chat
@@ -240,9 +307,8 @@ function bindEvents() {
         saveState();
     };
 
-    // Inference params
+    // Inference params (SysPrompt tab)
     const paramInputs = {
-        "llm-param-ctx": { get: () => nCtx, set: (v) => { nCtx = parseInt(v) || 8192; } },
         "llm-param-tokens": { get: () => maxTokens, set: (v) => { maxTokens = parseInt(v) || 300; } },
         "llm-param-temp": { get: () => temperature, set: (v) => { temperature = v; } },
         "llm-param-topp": { get: () => topP, set: (v) => { topP = v; } },
@@ -251,9 +317,44 @@ function bindEvents() {
     };
     for (const [id, p] of Object.entries(paramInputs)) {
         const el = panel.querySelector("#" + id);
-        el.value = p.get();
-        el.oninput = () => { p.set(el.value); saveState(); };
+        if (el) {
+            el.value = p.get();
+            el.oninput = () => { p.set(el.value); saveState(); };
+        }
     }
+
+    // Setup params (Setup tab)
+    const setupInputs = {
+        "llm-setup-ctx": { get: () => nCtx, set: (v) => { nCtx = parseInt(v) || 8192; } },
+        "llm-setup-gpu": { get: () => nGpuLayers, set: (v) => { nGpuLayers = parseInt(v); if (isNaN(nGpuLayers)) nGpuLayers = -1; } },
+        "llm-setup-vram": { get: () => vramLimit, set: (v) => { vramLimit = parseInt(v); if (isNaN(vramLimit)) vramLimit = -1; } },
+        "llm-setup-cpu-moe": { get: () => nCpuMoe, set: (v) => { nCpuMoe = parseInt(v) || 0; } },
+        "llm-setup-seq": { get: () => nSeqMax, set: (v) => { nSeqMax = parseInt(v) || 1; } },
+        "llm-setup-img-min": { get: () => imageMinTokens, set: (v) => { imageMinTokens = parseInt(v) || 0; } },
+        "llm-setup-img-max": { get: () => imageMaxTokens, set: (v) => { imageMaxTokens = parseInt(v) || 0; } },
+    };
+    for (const [id, p] of Object.entries(setupInputs)) {
+        const el = panel.querySelector("#" + id);
+        if (el) {
+            el.value = p.get();
+            el.oninput = () => { p.set(el.value); saveState(); };
+        }
+    }
+
+    // Setup selects
+    const ctkEl = panel.querySelector("#llm-setup-ctk");
+    if (ctkEl) {
+        ctkEl.value = cacheTypeK;
+        ctkEl.onchange = () => { cacheTypeK = ctkEl.value; saveState(); };
+    }
+    const ctvEl = panel.querySelector("#llm-setup-ctv");
+    if (ctvEl) {
+        ctvEl.value = cacheTypeV;
+        ctvEl.onchange = () => { cacheTypeV = ctvEl.value; saveState(); };
+    }
+
+    // Apply & Reload
+    panel.querySelector("#llm-setup-apply").onclick = applySettings;
 }
 
 // ---- Tab switching ----
@@ -262,11 +363,14 @@ function switchTab(tab) {
     panel.querySelector("#llm-tab-chat").classList.toggle("active", tab === "chat");
     panel.querySelector("#llm-tab-desc").classList.toggle("active", tab === "desc");
     panel.querySelector("#llm-tab-sys").classList.toggle("active", tab === "sys");
+    panel.querySelector("#llm-tab-setup").classList.toggle("active", tab === "setup");
     panel.querySelector("#llm-chat-panel").style.display = tab === "chat" ? "flex" : "none";
     panel.querySelector("#llm-desc-panel").style.display = tab === "desc" ? "flex" : "none";
     panel.querySelector("#llm-sys-panel").style.display = tab === "sys" ? "flex" : "none";
-    if (tab === "chat") updateChatUI();
+    panel.querySelector("#llm-setup-panel").style.display = tab === "setup" ? "flex" : "none";
+    if (tab === "chat") { refreshModels(); updateChatUI(); }
     if (tab === "desc") updateDescribeUI();
+    if (tab === "setup") updateSetupUI();
 }
 
 // ---- Toggle ----
@@ -291,8 +395,10 @@ function togglePanel() {
         if (activeTab === "chat") {
             refreshModels();
             updateChatUI();
-        } else {
+        } else if (activeTab === "desc") {
             updateDescribeUI();
+        } else if (activeTab === "setup") {
+            updateSetupUI();
         }
     } else {
         panel.style.display = "none";
@@ -363,8 +469,112 @@ function buildOptions() {
     if (topK !== "") opts.top_k = parseInt(topK);
     if (repeatPenalty !== "") opts.repeat_penalty = parseFloat(repeatPenalty);
     if (maxTokens) opts.max_tokens = parseInt(maxTokens);
+    // Load params for first-load (ignored if model already loaded)
     if (nCtx) opts.n_ctx = parseInt(nCtx);
+    opts.n_gpu_layers = nGpuLayers;
+    opts.vram_limit = vramLimit;
+    opts.cache_type_k = cacheTypeK;
+    opts.cache_type_v = cacheTypeV;
+    opts.n_cpu_moe = nCpuMoe;
+    opts.n_seq_max = nSeqMax;
+    opts.image_min_tokens = imageMinTokens;
+    opts.image_max_tokens = imageMaxTokens;
     return opts;
+}
+
+// ---- Setup tab ----
+async function updateSetupUI() {
+    // Fetch current status to show loaded config
+    try {
+        const resp = await api.fetchApi("/llm-sidebar/status");
+        const data = await resp.json();
+        if (data?.success) {
+            const d = data.data;
+            const loadedEl = panel.querySelector("#llm-setup-loaded");
+            if (d.loaded && d.current_config) {
+                const cfg = d.current_config;
+                loadedEl.innerHTML = '<span style="color:#4a6">● Model loaded</span> ' +
+                    '<span style="color:#aaa">' + (d.loaded_model || "?") + '</span>';
+                // Fill fields with current loaded values
+                const ctkEl = panel.querySelector("#llm-setup-ctk");
+                const ctvEl = panel.querySelector("#llm-setup-ctv");
+                panel.querySelector("#llm-setup-ctx").value = cfg.n_ctx || 8192;
+                panel.querySelector("#llm-setup-gpu").value = cfg.n_gpu_layers != null ? cfg.n_gpu_layers : -1;
+                panel.querySelector("#llm-setup-vram").value = cfg.vram_limit || -1;
+                panel.querySelector("#llm-setup-cpu-moe").value = cfg.n_cpu_moe || 0;
+                panel.querySelector("#llm-setup-seq").value = cfg.n_seq_max || 1;
+                panel.querySelector("#llm-setup-img-min").value = cfg.image_min_tokens || 0;
+                panel.querySelector("#llm-setup-img-max").value = cfg.image_max_tokens || 0;
+                if (ctkEl) ctkEl.value = cfg.cache_type_k || "default";
+                if (ctvEl) ctvEl.value = cfg.cache_type_v || "default";
+            } else {
+                loadedEl.innerHTML = '<span style="color:#888">○ No model loaded</span>';
+                // Restore our saved values
+                panel.querySelector("#llm-setup-ctx").value = nCtx;
+                panel.querySelector("#llm-setup-gpu").value = nGpuLayers;
+                panel.querySelector("#llm-setup-vram").value = vramLimit;
+                panel.querySelector("#llm-setup-cpu-moe").value = nCpuMoe;
+                panel.querySelector("#llm-setup-seq").value = nSeqMax;
+                panel.querySelector("#llm-setup-img-min").value = imageMinTokens;
+                panel.querySelector("#llm-setup-img-max").value = imageMaxTokens;
+                const ctkEl = panel.querySelector("#llm-setup-ctk");
+                const ctvEl = panel.querySelector("#llm-setup-ctv");
+                if (ctkEl) ctkEl.value = cacheTypeK;
+                if (ctvEl) ctvEl.value = cacheTypeV;
+            }
+        }
+    } catch (e) {
+        console.warn("LlmSidebar: setup status fetch failed", e);
+    }
+}
+
+async function applySettings() {
+    if (!selectedModel) {
+        alert("Select a model in the Chat tab first.");
+        return;
+    }
+    const btn = panel.querySelector("#llm-setup-apply");
+    btn.disabled = true;
+    btn.textContent = "Reloading...";
+
+    try {
+        const resp = await api.fetchApi("/llm-sidebar/apply-settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                model: selectedModel,
+                chat_handler: selectedHandler,
+                mmproj: selectedMmproj || "None",
+                n_ctx: nCtx,
+                n_gpu_layers: nGpuLayers,
+                vram_limit: vramLimit,
+                cache_type_k: cacheTypeK,
+                cache_type_v: cacheTypeV,
+                n_cpu_moe: nCpuMoe,
+                n_seq_max: nSeqMax,
+                image_min_tokens: imageMinTokens,
+                image_max_tokens: imageMaxTokens,
+            }),
+        });
+        const data = await resp.json();
+        if (data?.success) {
+            btn.textContent = "✓ Reloaded";
+            btn.style.background = "#484";
+            setTimeout(() => {
+                btn.textContent = "Apply & Reload";
+                btn.style.background = "";
+            }, 2000);
+            updateSetupUI();
+        } else {
+            btn.textContent = "Apply & Reload";
+            btn.disabled = false;
+            alert("Reload failed: " + (data?.error || "unknown error"));
+        }
+    } catch (e) {
+        btn.textContent = "Apply & Reload";
+        btn.disabled = false;
+        alert("Reload failed: " + e.message);
+    }
 }
 
 // ---- Chat ----
