@@ -1,12 +1,12 @@
 /**
- * ComfyUI-LlmSidebar â€” rightClick.js
+ * ComfyUI-LlmSidebar â€?rightClick.js
  * Hooks into node right-click menus:
- *   LoadImage       â†’ "ğŸ” Describe with LLM" (file path â†’ vision)
- *   IMAGE output    â†’ "ğŸ” Describe with LLM" (cached output â†’ vision)
- *   Text nodes      â†’ "ğŸ“‹ Copy to Describe"
+ *   LoadImage       â†?"ğŸ” Describe with LLM" (file path â†?vision)
+ *   IMAGE output    â†?"ğŸ” Describe with LLM" (cached output â†?vision)
+ *   Text nodes      â†?"ğŸ“‹ Copy to Describe"
  */
 
-import { app } from "../../../scripts/app.js";
+const { app } = window.comfyAPI.app;
 
 const IMAGE_NODE_TYPES = new Set([
     "LoadImage",
@@ -152,11 +152,11 @@ function ensureSidebar() {
  * After execution, ComfyUI stores <img> DOM elements in node.imgs.
  */
 async function getNodePreviewImage(node) {
-    // node.imgs â€” <img> DOM elements populated by ComfyUI after execution
+    // node.imgs â€?<img> DOM elements populated by ComfyUI after execution
     if (node.imgs && node.imgs.length > 0) {
         const img = node.imgs[0];
 
-        // It's a DOM <img> element â€” use its src directly
+        // It's a DOM <img> element â€?use its src directly
         if (img instanceof HTMLImageElement && img.currentSrc) {
             return fetchNodeImage(img.currentSrc);
         }
@@ -201,3 +201,4 @@ async function fetchNodeImage(url) {
         return null;
     }
 }
+

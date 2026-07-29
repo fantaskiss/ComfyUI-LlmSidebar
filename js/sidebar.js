@@ -10,8 +10,6 @@
  * - "Apply & Reload" button in Setup tab force-reloads with new params.
  */
 
-import { app } from "../../../scripts/app.js";
-import { api } from "../../../scripts/api.js";
 
 // ---- state ----
 let panel = null;
@@ -408,7 +406,7 @@ function togglePanel() {
 // ---- Model loading ----
 async function refreshModels() {
     try {
-        const resp = await api.fetchApi("/llm-sidebar/models");
+        const resp = await fetch("/llm-sidebar/models");
         const data = await resp.json();
         allModels = data?.data?.text || [];
         allMmproj = data?.data?.mmproj || [];
@@ -486,7 +484,7 @@ function buildOptions() {
 async function updateSetupUI() {
     // Fetch current status to show loaded config
     try {
-        const resp = await api.fetchApi("/llm-sidebar/status");
+        const resp = await fetch("/llm-sidebar/status");
         const data = await resp.json();
         if (data?.success) {
             const d = data.data;
@@ -538,7 +536,7 @@ async function applySettings() {
     btn.textContent = "Reloading...";
 
     try {
-        const resp = await api.fetchApi("/llm-sidebar/apply-settings", {
+        const resp = await fetch("/llm-sidebar/apply-settings", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -640,7 +638,7 @@ async function sendMessage() {
     const lastText = lastMsg?.querySelector("div:last-child");
 
     try {
-        const resp = await api.fetchApi("/llm-sidebar/chat/stream", {
+        const resp = await fetch("/llm-sidebar/chat/stream", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -692,7 +690,7 @@ async function sendMessage() {
 
 async function unloadModel() {
     try {
-        await api.fetchApi("/llm-sidebar/unload", { method: "POST" });
+        await fetch("/llm-sidebar/unload", { method: "POST" });
         chatHistory.push({ role: "system", content: "🔄 Model unloaded. Select a model and send a message to reload." });
         updateChatUI();
         saveState();
@@ -712,7 +710,7 @@ async function newChat() {
     updateChatUI();
     saveState();
     try {
-        await api.fetchApi("/llm-sidebar/reset", { method: "POST" });
+        await fetch("/llm-sidebar/reset", { method: "POST" });
     } catch (e) {
         console.warn("LlmSidebar: reset failed", e);
     }
@@ -768,7 +766,7 @@ async function visionDescribe(images, prompt) {
         chatHistory.push({ role: "system", content: "🔍 Analyzing image..." });
         updateChatUI();
 
-        const resp = await api.fetchApi("/llm-sidebar/vision", {
+        const resp = await fetch("/llm-sidebar/vision", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -898,22 +896,32 @@ function createToggleButton() {
 }
 
 // ---- Extension registration ----
-app.registerExtension({
-    name: "ComfyUI.LlmSidebar",
+// Register with the Vite frontend's extension system
+(async function() {
+    // Poll for window.app to be ready
+    for (let i = 0; i < 100; i++) {
+        const a = window.app;
+        if (a && typeof a.registerExtension === 'function') {
+            a.registerExtension({
+                name: "ComfyUI.LlmSidebar",
+                async setup() {
+                    loadState();
+                    createPanel();
+                    createToggleButton();
+                    refreshModels();
 
-    async setup() {
-        loadState();
-        createPanel();
-        createToggleButton();
-        refreshModels();
-
-        // Expose for rightClick.js
-        window.LlmSidebar = {
-            appendToDescribe,
-            onRightClickVision,
-            togglePanel,
-            get selectedModel() { return selectedModel; },
-            get selectedHandler() { return selectedHandler; },
-        };
-    },
-});
+                    window.LlmSidebar = {
+                        appendToDescribe,
+                        onRightClickVision,
+                        togglePanel,
+                        get selectedModel() { return selectedModel; },
+                        get selectedHandler() { return selectedHandler; },
+                    };
+                },
+            });
+            return;
+        }
+        await new Promise(r => setTimeout(r, 200));
+    }
+    console.warn("[LlmSidebar] app.registerExtension not available after 20s");
+})();

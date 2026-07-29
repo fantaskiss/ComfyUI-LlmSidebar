@@ -195,6 +195,61 @@ def _build_config(model: str, *, chat_handler: str = "None",
 _DEFAULT_IMAGE_MIN_TOKENS = 1024
 _DEFAULT_IMAGE_MAX_TOKENS = 4096
 
+# ============================================================
+# Tool registry
+# ============================================================
+
+_TOOLS = {}
+_TOOLS_ENABLED = False
+_WIKI_PATH = ""
+_MAX_TOOL_ROUNDS = 10
+_TOOL_RESULT_MAX_CHARS = 8000
+_LAST_CONTEXT_TOKENS = 0    # estimated tokens in current conversation
+_LAST_CONTEXT_LIMIT = 8192  # n_ctx from last model load
+
+
+def register_tool(name, fn, description, parameters_schema):
+    _TOOLS[name] = {"fn": fn, "description": description, "parameters": parameters_schema}
+
+
+def dispatch_tool(tool_name, tool_params):
+    if tool_name not in _TOOLS:
+        return f"Error: Tool '{tool_name}' not found. Available: {list(_TOOLS.keys())}"
+    try:
+        result = _TOOLS[tool_name]["fn"](**tool_params)
+        if result is None:
+            return "(tool returned no output)"
+        s = str(result)
+        if len(s) > _TOOL_RESULT_MAX_CHARS:
+            s = s[:_TOOL_RESULT_MAX_CHARS] + f"\n...(truncated, total {len(str(result))} chars)"
+        return s
+    except Exception as e:
+        import traceback
+        return f"Error: {e}\n{traceback.format_exc()}"
+
+
+def get_tools_config():
+    return {
+        "enabled": _TOOLS_ENABLED,
+        "wiki_path": _WIKI_PATH,
+        "max_rounds": _MAX_TOOL_ROUNDS,
+        "result_max_chars": _TOOL_RESULT_MAX_CHARS,
+    }
+
+
+def set_tools_config(enabled=None, wiki_path=None, max_rounds=None, result_max_chars=None):
+    global _TOOLS_ENABLED, _WIKI_PATH, _MAX_TOOL_ROUNDS, _TOOL_RESULT_MAX_CHARS
+    if enabled is not None:
+        _TOOLS_ENABLED = bool(enabled)
+    if wiki_path is not None:
+        _WIKI_PATH = str(wiki_path)
+    if max_rounds is not None:
+        _MAX_TOOL_ROUNDS = max(1, int(max_rounds))
+    if result_max_chars is not None:
+        _TOOL_RESULT_MAX_CHARS = max(100, int(result_max_chars))
+    return get_tools_config()
+
+
 def _ensure_model(model: str, *, chat_handler: str = "None",
                   mmproj: str = "None", n_ctx: int = _DEFAULT_N_CTX,
                   vram_limit: int = -1, image_min_tokens: int = _DEFAULT_IMAGE_MIN_TOKENS,
@@ -355,15 +410,25 @@ def chat(model: str, prompt: str, *,
     messages.append({"role": "user", "content": prompt})
 
     if not stream:
-        resp = llm.create_chat_completion(messages=messages, **llama_opts)
-        text = resp["choices"][0]["message"]["content"]
-        history.append({"role": "user", "content": prompt})
-        history.append({"role": "assistant", "content": text})
-        storage.messages[uid] = history
-        _trim_history(history)
-        return text.strip()
+        return _chat_with_tools(
+            llm, messages, history, uid, storage,
+            prompt, system_prompt, llama_opts, stream=False
+        )
 
-    # Streaming
+    # Streaming (with tool support)
+    if _TOOLS_ENABLED:
+        result = _chat_with_tools(
+            llm, messages, history, uid, storage,
+            prompt, system_prompt, llama_opts, stream=True
+        )
+        if isinstance(result, str):
+            yield {"chunk": result, "done": True, "full_response": result}
+            return
+        for chunk in result:
+            yield chunk
+        _clear_kv_cache(storage)
+        return
+    
     gen = llm.create_chat_completion(messages=messages, stream=True, **llama_opts)
     full = ""
     for chunk in gen:
@@ -372,19 +437,169 @@ def chat(model: str, prompt: str, *,
             continue
         choice = choices[0]
         delta = choice.get("delta", {})
-        content = (delta.get("content", "") if isinstance(delta, dict) else "")
-        if not content and choice.get("finish_reason"):
+        c = (delta.get("content", "") if isinstance(delta, dict) else "")
+        if not c and choice.get("finish_reason"):
             break
-        if content:
-            full += content
-            yield {"chunk": content, "done": False}
+        if c:
+            full += c
+            yield {"chunk": c, "done": False}
     history.append({"role": "user", "content": prompt})
     history.append({"role": "assistant", "content": full.strip()})
     storage.messages[uid] = history
     _trim_history(history)
+    _clear_kv_cache(storage)
+    yield {"chunk": "", "done": True, "full_response": full.strip()}
+
+
+
+def _build_tool_schemas():
+    """Build OpenAI-compatible tool schemas for native function calling."""
+    if not _TOOLS_ENABLED or not _TOOLS:
+        return None
+    schemas = []
+    for name, info in _TOOLS.items():
+        props = {}
+        required = []
+        for pname, pspec in info["parameters"].items():
+            props[pname] = {
+                "type": pspec.get("type", "string"),
+                "description": pspec.get("description", ""),
+            }
+            required.append(pname)
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": info["description"],
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": required,
+                },
+            },
+        })
+    return schemas
+
+
+def _chat_with_tools(llm, messages, history, uid, storage, prompt, system_prompt, llama_opts, stream):
+    """Tool-calling loop using llama-cpp-python native function calling (tools parameter)."""
     
-    # Qwen3.5 uses hybrid cache (Mamba+Attention). Clear KV cache after each
-    # generation to avoid stale cache interfering with multi-turn conversations.
+    tool_schemas = _build_tool_schemas()
+    _log.info("[TOOLS] enabled=%s, schemas=%s, wiki=%s, max_rounds=%s",
+              _TOOLS_ENABLED, len(tool_schemas) if tool_schemas else 0,
+              _WIKI_PATH, _MAX_TOOL_ROUNDS)
+    if tool_schemas:
+        _log.info("[TOOLS-DEBUG] tool names: %s", [t["function"]["name"] for t in tool_schemas])
+    else:
+        _log.info("[TOOLS-DEBUG] No tool schemas — tools disabled or _TOOLS empty. _TOOLS=%s", list(_TOOLS.keys()))
+    tool_msgs = list(messages)
+    
+    rounds = 0
+    max_r = _MAX_TOOL_ROUNDS if _TOOLS_ENABLED and tool_schemas else 1
+    history.append({"role": "user", "content": prompt})
+    
+    while rounds < max_r:
+        # Call model with native tools parameter
+        if _TOOLS_ENABLED and tool_schemas:
+            _log.info("[TOOLS] Round %s: calling with %s tools", rounds, len(tool_schemas))
+            resp = llm.create_chat_completion(
+                messages=tool_msgs,
+                tools=tool_schemas,
+                **llama_opts
+            )
+        else:
+            _log.info("[TOOLS] Round %s: calling WITHOUT tools (enabled=%s, schemas=%s)",
+                      rounds, _TOOLS_ENABLED, bool(tool_schemas))
+            resp = llm.create_chat_completion(messages=tool_msgs, **llama_opts)
+        
+        msg = resp["choices"][0]["message"]
+        tool_calls = msg.get("tool_calls")
+        content_text = (msg.get("content") or "").strip()
+        
+        # Try to parse tool call from either native tool_calls or text content
+        tool_name = None
+        tool_params = {}
+        
+        if tool_calls:
+            # Native function calling
+            tc = tool_calls[0]
+            tool_name = tc["function"]["name"]
+            try:
+                tool_params = json.loads(tc["function"]["arguments"])
+            except json.JSONDecodeError:
+                tool_params = {}
+            _log.info("Tool call (native): %s(%s)", tool_name, tool_params)
+        elif content_text:
+            # Text-format tool call: <tool_call><function=name><parameter=key>value...
+            import re
+            fn_match = re.search(r'<function=([^>]+)>', content_text)
+            if fn_match:
+                tool_name = fn_match.group(1).strip()
+                # Extract parameters: <parameter=key>value (non-greedy, stops at < or end)
+                param_matches = re.findall(r'<parameter=([^>]+)>\s*([^<]+)', content_text)
+                tool_params = {k.strip(): v.strip() for k, v in param_matches}
+                _log.info("Tool call (text): %s(%s)", tool_name, tool_params)
+        
+        if not tool_name:
+            # No tool call — final answer
+            history.append({"role": "assistant", "content": content_text or "(empty)"})
+            storage.messages[uid] = history
+            _trim_history(history)
+            if stream:
+                return _stream_final(llm, tool_msgs, llama_opts, content_text)
+            return content_text
+        
+        # We have a tool call — execute it
+        tool_result = dispatch_tool(tool_name, tool_params)
+        
+        # Append to conversation
+        tool_msgs.append({
+            "role": "assistant",
+            "content": content_text,
+        })
+        tool_msgs.append({
+            "role": "user",
+            "content": f"Tool '{tool_name}' result:\n{tool_result}\n\nBased on this result, continue answering the user's original question."
+        })
+        history.append({"role": "assistant", "content": f"[tool: {tool_name}]"})
+        _update_context_usage(history, storage)
+        rounds += 1
+    
+    # Max rounds — force final
+    tool_msgs.append({"role": "user", "content": "Maximum tool calls reached. Provide your final answer now."})
+    resp = llm.create_chat_completion(messages=tool_msgs, **llama_opts)
+    text = resp["choices"][0]["message"]["content"].strip()
+    history.append({"role": "assistant", "content": text or "(empty)"})
+    storage.messages[uid] = history
+    _trim_history(history)
+    _update_context_usage(history, storage)
+    return text
+
+
+def _update_context_usage(history, storage):
+    global _LAST_CONTEXT_TOKENS, _LAST_CONTEXT_LIMIT
+    # Estimate tokens: total chars / 3 (rough for mixed CN/EN)
+    total_chars = sum(len(str(m.get("content", ""))) for m in history)
+    _LAST_CONTEXT_TOKENS = max(1, total_chars // 3)
+    cfg = storage.current_config
+    if cfg:
+        _LAST_CONTEXT_LIMIT = cfg.get("n_ctx", 8192)
+
+
+def _stream_final(llm, messages, llama_opts, fallback_text):
+    """Stream the already-generated text. No re-generation needed."""
+    text = fallback_text.strip()
+    if not text:
+        yield {"chunk": "", "done": True, "full_response": ""}
+        return
+    words = text.split(" ")
+    for i, w in enumerate(words):
+        chunk = w + (" " if i < len(words) - 1 else "")
+        yield {"chunk": chunk, "done": False}
+    yield {"chunk": "", "done": True, "full_response": text}
+
+
+def _clear_kv_cache(storage):
     cfg = storage.current_config
     if cfg and cfg.get("chat_handler", "") in ("Qwen3.5", "Qwen3.5-Thinking"):
         try:
@@ -394,8 +609,6 @@ def chat(model: str, prompt: str, *,
                 storage.llm._hybrid_cache_mgr.clear()
         except Exception:
             pass
-    
-    yield {"chunk": "", "done": True, "full_response": full.strip()}
 
 
 def _trim_history(history: list, max_turns: int = 20):
@@ -482,6 +695,111 @@ def vision(model: str, prompt: str, images, *,
 # Status
 # ============================================================
 
+
+# ============================================================
+# File reading tool (file_read)
+# ============================================================
+
+import json as _json
+
+_PROGRAMMING_EXTENSIONS = [".py", ".js", ".java", ".c", ".cpp", ".html", ".css", ".sql", ".r", ".swift"]
+
+
+def _read_one(path):
+    text = ""
+    lp = path.lower()
+    if lp.endswith(".docx"):
+        try:
+            import docx2txt
+            text = docx2txt.process(path) or ""
+        except ImportError:
+            text = "[Error: docx2txt not installed]"
+    elif lp.endswith(".md") or lp.endswith(".txt"):
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    elif lp.endswith(".pdf"):
+        try:
+            import pdfplumber
+            with pdfplumber.open(path) as pdf:
+                for page in pdf.pages:
+                    t = page.extract_text()
+                    if t:
+                        text += t + "\n"
+        except ImportError:
+            text = "[Error: pdfplumber not installed]"
+    elif lp.endswith(".json"):
+        with open(path, "r", encoding="utf-8") as f:
+            text = _json.dumps(_json.load(f), ensure_ascii=False, indent=2)
+    elif lp.endswith(".xlsx"):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(path, data_only=True)
+            for sn in wb.sheetnames:
+                ws = wb[sn]
+                text += f"## {sn}\n"
+                for row in ws.iter_rows(values_only=True):
+                    text += " | ".join([str(c) if c is not None else "" for c in row]) + "\n"
+        except ImportError:
+            text = "[Error: openpyxl not installed]"
+    elif lp.endswith(".csv"):
+        try:
+            import pandas as pd
+            df = pd.read_csv(path)
+            text = df.to_string()
+        except ImportError:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+    elif any(lp.endswith(ext) for ext in _PROGRAMMING_EXTENSIONS):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            with open(path, "r", encoding="latin-1") as f:
+                text = f.read()
+    else:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except (UnicodeDecodeError, IsADirectoryError):
+            text = f"[Cannot read: {path}]"
+    return text
+
+
+def _get_file_tree(folder_path):
+    tree = {}
+    try:
+        for item in sorted(os.listdir(folder_path)):
+            full = os.path.join(folder_path, item)
+            if os.path.isdir(full):
+                tree[item + "/"] = _get_file_tree(full)
+            else:
+                tree[item] = None
+    except PermissionError:
+        tree["(permission denied)"] = None
+    return tree
+
+
+def tool_file_read(file_path):
+    if not _WIKI_PATH:
+        return "Error: Wiki path not configured. Set it in the Setup tab."
+    wiki = os.path.abspath(_WIKI_PATH)
+    target = os.path.abspath(file_path) if os.path.isabs(file_path) else os.path.abspath(os.path.join(wiki, file_path))
+    wiki_sep = wiki.rstrip(os.sep) + os.sep
+    if not (target.startswith(wiki_sep) or target == wiki):
+        tree = _get_file_tree(wiki)
+        return f"Error: Access denied. Path outside wiki.\nWiki: {wiki}\nContents:\n{_json.dumps(tree, ensure_ascii=False, indent=2)}"
+    if os.path.isfile(target):
+        content = _read_one(target)
+        rel = os.path.relpath(target, wiki)
+        return f"File: {rel}\n\n{content}"
+    elif os.path.isdir(target):
+        tree = _get_file_tree(target)
+        rel = os.path.relpath(target, wiki) if target != wiki else "."
+        return f"Folder: {rel}\n\n{_json.dumps(tree, ensure_ascii=False, indent=2)}"
+    else:
+        tree = _get_file_tree(wiki)
+        return f"Path not found: '{file_path}'.\nWiki contents:\n{_json.dumps(tree, ensure_ascii=False, indent=2)}"
+
 def get_status() -> dict:
     try:
         storage = _get_storage()
@@ -493,6 +811,8 @@ def get_status() -> dict:
     cfg = storage.current_config
     return {
         "loaded": storage.llm is not None,
+        "context_tokens": _LAST_CONTEXT_TOKENS,
+        "context_limit": _LAST_CONTEXT_LIMIT,
         "loaded_model": cfg.get("model") if cfg else None,
         "loaded_handler": cfg.get("chat_handler") if cfg else None,
         "current_config": dict(cfg) if cfg else None,
@@ -502,3 +822,19 @@ def get_status() -> dict:
         "chat_handlers": get_chat_handlers(),
         "models_dir": _get_models_dir(),
     }
+
+# ---- Register built-in tools ----
+register_tool(
+    "file_read",
+    tool_file_read,
+    "Read a file or list a folder within the configured wiki directory. "
+    "Use this to look up information you do not know. "
+    "Pass a relative path like 'INDEX.md' or an absolute path within the wiki.",
+    {
+        "file_path": {
+            "type": "string",
+            "description": "Path to file/folder. Relative paths resolve against the wiki root."
+        }
+    }
+)
+

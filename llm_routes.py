@@ -77,6 +77,18 @@ def register_routes(prompt_server, llm_module):
             mmproj = data.get("mmproj_file", "None")
             options = data.get("options", None)
 
+            # Apply tools config from request
+            tools_enabled = data.get("tools_enabled", False)
+            wiki_path = data.get("wiki_path", "")
+            max_rounds = data.get("max_tool_rounds", 10)
+            result_max_chars = data.get("tool_result_max_chars", 8000)
+            _llm.set_tools_config(
+                enabled=tools_enabled,
+                wiki_path=wiki_path,
+                max_rounds=max_rounds,
+                result_max_chars=result_max_chars,
+            )
+
             generator = _llm.chat(
                 model, prompt,
                 system_prompt=system_prompt,
@@ -243,5 +255,28 @@ def register_routes(prompt_server, llm_module):
             result["storage_info"] = {"error": str(e)}
         
         return web.json_response({"success": True, "data": result})
+
+    # ---- GET /llm-sidebar/tools/config ----
+    @prompt_server.routes.get("/llm-sidebar/tools/config")
+    async def tools_config_get(request):
+        try:
+            return web.json_response({"success": True, "data": _llm.get_tools_config()})
+        except Exception as e:
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    # ---- POST /llm-sidebar/tools/config ----
+    @prompt_server.routes.post("/llm-sidebar/tools/config")
+    async def tools_config_set(request):
+        try:
+            data = await request.json()
+            result = _llm.set_tools_config(
+                enabled=data.get("enabled"),
+                wiki_path=data.get("wiki_path"),
+                max_rounds=data.get("max_rounds"),
+                result_max_chars=data.get("result_max_chars"),
+            )
+            return web.json_response({"success": True, "data": result})
+        except Exception as e:
+            return web.json_response({"success": False, "error": str(e)}, status=400)
 
     _log.info("LlmSidebar routes registered")
