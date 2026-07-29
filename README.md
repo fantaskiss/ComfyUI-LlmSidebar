@@ -10,3 +10,9 @@
 
 
 歪脖编写，若有错误请自行或者同样歪脖修改。感谢ds！
+
+20260729: 
+
+增加了本地读取文件的简单loop engine，可以使用llm wiki
+<img width="753" height="603" alt="ab5eacea046968ef88c61e6f22889fdd" src="https://github.com/user-attachments/assets/5421a275-5e03-4cae-a326-f61b661e4ced" />
+<img width="1019" height="936" alt="5dd4c080cf5907c88bb2cf2af06261ba" src="https://github.com/user-attachments/assets/2593b109-0303-4c4b-bc44-33c1c7d8b891" />
