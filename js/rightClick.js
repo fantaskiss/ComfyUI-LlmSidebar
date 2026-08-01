@@ -1,9 +1,9 @@
-/**
- * ComfyUI-LlmSidebar �?rightClick.js
+﻿/**
+ * ComfyUI-LlmSidebar  rightClick.js
  * Hooks into node right-click menus:
- *   LoadImage       �?"🔍 Describe with LLM" (file path �?vision)
- *   IMAGE output    �?"🔍 Describe with LLM" (cached output �?vision)
- *   Text nodes      �?"📋 Copy to Describe"
+ *   LoadImage       😯 Describe with LLM" (file path 鈫?vision)
+ *   IMAGE output    😯 Describe with LLM" (cached output 鈫?vision)
+ *   Text nodes      😯 Copy to Describe"
  */
 
 const { app } = window.comfyAPI.app;
@@ -46,19 +46,19 @@ app.registerExtension({
 
                 if (isImageNode) {
                     options.push({
-                        content: "🔍 Describe with LLM",
+                        content: "😯 Describe with LLM",
                         callback: () => describeImageNode(this),
                     });
                 } else if (hasImageOutput) {
                     options.push({
-                        content: "🔍 Describe with LLM",
+                        content: "😯 Describe with LLM",
                         callback: () => describeOutputImage(this),
                     });
                 }
 
                 if (isTextNode) {
                     options.push({
-                        content: "📋 Copy to Describe",
+                        content: "😯 Copy to Describe",
                         callback: () => copyTextToDescribe(this),
                     });
                 }
@@ -77,7 +77,7 @@ async function describeImageNode(node) {
 
     const sidebar = window.LlmSidebar;
     if (!sidebar.selectedModel) {
-        alert("Select a model in the 💬 LLM sidebar first.");
+        alert("Select a model in the ⚡ LLM sidebar first.");
         sidebar.togglePanel();
         return;
     }
@@ -110,7 +110,7 @@ async function describeOutputImage(node) {
 
     const sidebar = window.LlmSidebar;
     if (!sidebar.selectedModel) {
-        alert("Select a model in the 💬 LLM sidebar first.");
+        alert("Select a model in the ⚡ LLM sidebar first.");
         sidebar.togglePanel();
         return;
     }
@@ -152,11 +152,11 @@ function ensureSidebar() {
  * After execution, ComfyUI stores <img> DOM elements in node.imgs.
  */
 async function getNodePreviewImage(node) {
-    // node.imgs �?<img> DOM elements populated by ComfyUI after execution
+    // node.imgs 鈥?<img> DOM elements populated by ComfyUI after execution
     if (node.imgs && node.imgs.length > 0) {
         const img = node.imgs[0];
 
-        // It's a DOM <img> element �?use its src directly
+        // It's a DOM <img> element 鈥?use its src directly
         if (img instanceof HTMLImageElement && img.currentSrc) {
             return fetchNodeImage(img.currentSrc);
         }

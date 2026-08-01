@@ -14,6 +14,12 @@ import folder_paths
 
 _log = logging.getLogger("LlmSidebar")
 
+# 提示词生成系统（阶段 0 程序路由 + 阶段 1 LLM 组装）
+try:
+    from . import prompt_generator
+except ImportError:  # pragma: no cover - 直接文件加载测试
+    import prompt_generator
+
 _SIDEBAR_UID = "sidebar"  # Fixed key in LLAMA_CPP_STORAGE.messages
 _DEFAULT_N_CTX = 8192
 
@@ -297,8 +303,13 @@ def apply_settings(model: str, *, chat_handler: str = "None",
                    cache_type_k: str = "default",
                    cache_type_v: str = "default",
                    n_cpu_moe: int = 0,
-                   n_seq_max: int = 1):
-    """Explicitly unload and reload with new settings. Used by Setup panel."""
+                   n_seq_max: int = 1,
+                   tools_enabled: bool = None,
+                   wiki_path: str = None,
+                   max_rounds: int = None,
+                   result_max_chars: int = None):
+    """Explicitly unload and reload with new settings. Used by Setup panel.
+    Also accepts tool config params forwarded from the frontend Apply button."""
     storage = _get_storage()
 
     # Save sidebar state before clean
@@ -324,6 +335,15 @@ def apply_settings(model: str, *, chat_handler: str = "None",
     if sidebar_history:
         storage.messages[_SIDEBAR_UID] = sidebar_history
         storage.sys_prompts[_SIDEBAR_UID] = sidebar_sys
+
+    # Apply tool config if provided (from Apply & Reload button)
+    if tools_enabled is not None or wiki_path is not None:
+        set_tools_config(
+            enabled=tools_enabled,
+            wiki_path=wiki_path,
+            max_rounds=max_rounds,
+            result_max_chars=result_max_chars,
+        )
 
     return True
 
@@ -447,6 +467,7 @@ def chat(model: str, prompt: str, *,
     history.append({"role": "assistant", "content": full.strip()})
     storage.messages[uid] = history
     _trim_history(history)
+    _update_context_usage(history, storage)
     _clear_kv_cache(storage)
     yield {"chunk": "", "done": True, "full_response": full.strip()}
 
@@ -545,6 +566,7 @@ def _chat_with_tools(llm, messages, history, uid, storage, prompt, system_prompt
             history.append({"role": "assistant", "content": content_text or "(empty)"})
             storage.messages[uid] = history
             _trim_history(history)
+            _update_context_usage(history, storage)
             if stream:
                 return _stream_final(llm, tool_msgs, llama_opts, content_text)
             return content_text
@@ -600,15 +622,37 @@ def _stream_final(llm, messages, llama_opts, fallback_text):
 
 
 def _clear_kv_cache(storage):
-    cfg = storage.current_config
-    if cfg and cfg.get("chat_handler", "") in ("Qwen3.5", "Qwen3.5-Thinking"):
-        try:
-            storage.llm.n_tokens = 0
-            storage.llm._ctx.memory_clear(True)
-            if storage.llm.is_hybrid and storage.llm._hybrid_cache_mgr is not None:
-                storage.llm._hybrid_cache_mgr.clear()
-        except Exception:
-            pass
+    """尽力清理 KV cache，防止跨调用状态残留（提示词生成系统连续调用时必需）。
+
+    不同 chat_handler 的清理路径不同，全部 try 一遍，失败静默。
+    """
+    llm = getattr(storage, "llm", None)
+    if llm is None:
+        return
+    # 1. 常见路径：n_tokens 归零 + memory_clear
+    try:
+        llm.n_tokens = 0
+    except Exception:
+        pass
+    try:
+        ctx = getattr(llm, "_ctx", None)
+        if ctx is not None and hasattr(ctx, "memory_clear"):
+            ctx.memory_clear(True)
+    except Exception:
+        pass
+    # 2. 混合架构缓存
+    try:
+        if getattr(llm, "is_hybrid", False) and getattr(llm, "_hybrid_cache_mgr", None) is not None:
+            llm._hybrid_cache_mgr.clear()
+    except Exception:
+        pass
+    # 3. reset() 兜底（llama-cpp-python 的 Llama.reset() 会清 KV cache）
+    try:
+        reset = getattr(llm, "reset", None)
+        if callable(reset):
+            reset()
+    except Exception:
+        pass
 
 
 def _trim_history(history: list, max_turns: int = 20):
@@ -694,6 +738,78 @@ def vision(model: str, prompt: str, images, *,
 # ============================================================
 # Status
 # ============================================================
+
+
+# ============================================================
+# 提示词生成系统入口（阶段 0 程序路由 + 阶段 1 LLM 组装）
+# ============================================================
+
+def generate_prompt(model: str, intent: str, wiki_path: str, *,
+                    system_prompt: str = "",
+                    chat_handler: str = "None",
+                    mmproj: str = "None",
+                    options: Optional[dict] = None,
+                    fallback: bool = True,
+                    max_rounds: int = 2) -> dict:
+    """用 wiki 生成绘画提示词：程序路由 → LLM 一次组装 → 降级兜底。
+
+    与 chat() 不同，本函数不走工具循环（程序直接读候选文件），
+    是"一次调用"路径。结果写入 sidebar 历史（保留生成历史）。
+    返回 dict（含 prompt / mode / route 等），由路由层转 JSON。
+    """
+    opts = dict(options or {})
+    n_ctx_val = int(opts.pop("n_ctx", _DEFAULT_N_CTX))
+    vram_limit = int(opts.pop("vram_limit", -1))
+    image_min = int(opts.pop("image_min_tokens", _DEFAULT_IMAGE_MIN_TOKENS))
+    image_max = int(opts.pop("image_max_tokens", _DEFAULT_IMAGE_MAX_TOKENS))
+    n_gpu_layers = int(opts.pop("n_gpu_layers", -1))
+    cache_type_k = str(opts.pop("cache_type_k", "default"))
+    cache_type_v = str(opts.pop("cache_type_v", "default"))
+    n_cpu_moe = int(opts.pop("n_cpu_moe", 0))
+    n_seq_max = int(opts.pop("n_seq_max", 1))
+
+    llm = _ensure_model(model, chat_handler=chat_handler, mmproj=mmproj,
+                        n_ctx=n_ctx_val, vram_limit=vram_limit,
+                        image_min_tokens=image_min, image_max_tokens=image_max,
+                        n_gpu_layers=n_gpu_layers,
+                        cache_type_k=cache_type_k,
+                        cache_type_v=cache_type_v,
+                        n_cpu_moe=n_cpu_moe,
+                        n_seq_max=n_seq_max)
+    llama_opts = _build_options(opts)
+
+    def _chat_fn(messages):
+        resp = llm.create_chat_completion(messages=messages, **llama_opts)
+        return resp["choices"][0]["message"].get("content") or ""
+
+    result = prompt_generator.generate_prompt(
+        intent, wiki_path, _chat_fn,
+        # system_prompt 是 Chat 聊天用的提示词，绝不能覆盖组装输出协议
+        # 组装协议永远用 DEFAULT_OUTPUT_PROTOCOL（含"禁止思考/只输出正文"硬规则）
+        output_protocol=prompt_generator.DEFAULT_OUTPUT_PROTOCOL,
+        max_rounds=max_rounds,
+        fallback=fallback,
+        max_ctx_tokens=n_ctx_val,
+    )
+
+    # 保留生成历史：意图 + 结果写入 sidebar 对话（工具中间产物不进历史）
+    if result.get("ok"):
+        storage = _get_storage()
+        history = storage.messages.get(_SIDEBAR_UID, [])
+        history.append({"role": "user", "content": f"[生成提示词] {intent}"})
+        history.append({"role": "assistant", "content": result.get("prompt", "")})
+        storage.messages[_SIDEBAR_UID] = history
+        _trim_history(history)
+        _update_context_usage(history, storage)
+
+    # 生成任务无状态：清 KV cache，防止连续生成时状态残留污染下一次
+    try:
+        storage = _get_storage()
+        _clear_kv_cache(storage)
+    except Exception:
+        pass
+
+    return result
 
 
 # ============================================================

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ComfyUI-LlmSidebar - sidebar.js
  * Self-contained floating panel with Chat + Describe + SysPrompt + Setup tabs.
  * Reuses LLAMA_CPP_STORAGE from ComfyUI-llama-cpp_vlm for model loading.
@@ -39,6 +39,22 @@ let nSeqMax = 1;
 let imageMinTokens = 1024;
 let imageMaxTokens = 4096;
 
+// Tool params (Setup tab)
+let toolsEnabled = false;
+let wikiPath = "";
+let maxToolRounds = 10;
+let toolResultMaxChars = 8000;
+
+// Gen tab (提示词生成系统)
+let genIntent = "";
+let genWikiPath = "";
+let genResult = null;
+let genBusy = false;
+
+// Context usage (Chat panel)
+let contextTokens = 0;
+let contextLimit = 8192;
+
 let allModels = [];
 let allMmproj = [];
 let allHandlers = ["None"];
@@ -77,6 +93,12 @@ function loadState() {
             nSeqMax = s.nSeqMax || 1;
             imageMinTokens = s.imageMinTokens || 1024;
             imageMaxTokens = s.imageMaxTokens || 4096;
+            toolsEnabled = s.toolsEnabled === true;
+            wikiPath = s.wikiPath || "";
+            maxToolRounds = s.maxToolRounds || 10;
+            toolResultMaxChars = s.toolResultMaxChars || 8000;
+            genIntent = s.genIntent || "";
+            genWikiPath = s.genWikiPath || s.wikiPath || "";
         }
     } catch (e) {}
 }
@@ -97,6 +119,8 @@ function saveState() {
             cacheTypeK, cacheTypeV,
             nCpuMoe, nSeqMax,
             imageMinTokens, imageMaxTokens,
+            toolsEnabled, wikiPath, maxToolRounds, toolResultMaxChars,
+            genIntent, genWikiPath,
         }));
     } catch (e) {}
 }
@@ -133,6 +157,7 @@ function createPanel() {
       <button id="llm-tab-chat" class="llm-tab active" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">💬 Chat</button>
       <button id="llm-tab-desc" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">📝 Desc</button>
       <button id="llm-tab-sys" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">⚙️ Sys</button>
+      <button id="llm-tab-gen" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">🎨 Gen</button>
       <button id="llm-tab-setup" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">🔧 Setup</button>
       <button id="llm-close" style="padding:10px 14px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:16px">✕</button>
     </div>
@@ -140,22 +165,16 @@ function createPanel() {
     <!-- Chat tab -->
     <div id="llm-chat-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
       <div style="display:flex;align-items:center;padding:8px;gap:6px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0;flex-wrap:wrap">
-        <select id="llm-model-select" style="flex:1;min-width:120px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:4px;font-size:12px;border-radius:4px"></select>
-        <select id="llm-handler-select" style="max-width:110px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:4px;font-size:11px;border-radius:4px" title="chat_handler (required for vision)">
-          <option value="None">handler: None</option>
-        </select>
-        <select id="llm-mmproj-select" style="max-width:100px;background:var(--bg-color,#222);color:var(--fg-color,#888);border:1px solid var(--border-color,#444);padding:4px;font-size:11px;border-radius:4px" title="mmproj for vision (None = no vision)">
-          <option value="None">mmproj: None</option>
-        </select>
+        <span id="llm-current-model" style="flex:1;min-width:0;font-size:12px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="当前载入模型。选择/加载在 Setup 标签">未加载</span>
         <button id="llm-unload" style="padding:4px 8px;background:#633;color:#faa;border:1px solid #844;border-radius:4px;cursor:pointer;font-size:11px">Unload</button>
         <button id="llm-clear-chat" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:11px">Clear</button>
       </div>
       <div id="llm-messages" style="flex:1;overflow-y:auto;padding:8px;min-height:0"></div>
-      <div style="display:flex;padding:8px;gap:6px;border-top:1px solid var(--border-color,#333);flex-shrink:0">
+      <div id="llm-ctx-bar" style="padding:2px 10px;font-size:10px;color:#666;text-align:right;flex-shrink:0;border-top:1px solid var(--border-color,#333)">ctx: --/--</div>
+      <div style="display:flex;padding:8px;gap:6px;border-top:none;flex-shrink:0">
         <textarea id="llm-input" rows="2" placeholder="Ask something..." style="flex:1;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:6px;resize:none;font-size:12px;font-family:inherit"></textarea>
         <button id="llm-send" style="padding:6px 14px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">Send</button>
         <button id="llm-new" style="padding:6px 10px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:12px">New</button>
-        <button id="llm-unload-bottom" style="padding:6px 10px;background:#633;color:#faa;border:1px solid #844;border-radius:4px;cursor:pointer;font-size:12px">Unload</button>
       </div>
     </div>
 
@@ -173,7 +192,7 @@ function createPanel() {
       <div style="display:flex;align-items:center;padding:6px 10px;gap:8px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0">
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
           <input type="checkbox" id="llm-sys-enabled" checked style="accent-color:var(--primary,#4a6)">
-          <span style="color:var(--fg-color,#ddd)">Enable</span>
+          <span style="color:var(--fg-color,#ddd)">✅ Enable</span>
         </label>
         <span style="flex:1"></span>
         <button id="llm-sys-reset" style="padding:2px 8px;background:#333;color:#ccc;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:11px">Reset</button>
@@ -188,17 +207,28 @@ function createPanel() {
       </div>
     </div>
 
-    <!-- Setup tab (model loading parameters) -->
+    <!-- Setup tab (model loading + tool parameters) -->
     <div id="llm-setup-panel" style="display:none;flex-direction:column;flex:1;min-height:0;overflow-y:auto">
       <div style="padding:8px 10px;font-size:11px;color:#888;border-bottom:1px solid var(--border-color,#333);flex-shrink:0">
         Model loading parameters. Used when no model is loaded yet.<br>
         After a model is loaded by a workflow node, sidebar reuses it as-is.
       </div>
-      <div id="llm-setup-params" style="padding:6px 10px;display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:11px;flex-shrink:0">
+      <div style="display:flex;align-items:center;padding:6px 10px;gap:6px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0;flex-wrap:wrap">
+        <select id="llm-setup-model-select" style="flex:2;min-width:140px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:4px;font-size:12px;border-radius:4px" title="模型（全局唯一加载入口）"></select>
+        <select id="llm-setup-handler-select" style="flex:1;min-width:90px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:4px;font-size:11px;border-radius:4px" title="chat_handler（视觉模型需要，纯文本用 None）">
+          <option value="None">handler: None</option>
+        </select>
+        <select id="llm-setup-mmproj-select" style="flex:1;min-width:90px;background:var(--bg-color,#222);color:var(--fg-color,#888);border:1px solid var(--border-color,#444);padding:4px;font-size:11px;border-radius:4px" title="mmproj（视觉投影器，None=纯文本）">
+          <option value="None">mmproj: None</option>
+        </select>
+      </div>
+      <div id="llm-setup-params" style="padding:6px 10px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px 10px;font-size:11px;flex-shrink:0">
+        <!-- Col 1: load params -->
         <div><label style="color:#888">context (n_ctx)</label><input id="llm-setup-ctx" type="number" min="512" max="327680" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px"></div>
         <div><label style="color:#888">n_gpu_layers</label><input id="llm-setup-gpu" type="number" min="-1" max="1024" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="-1 = auto/all layers. Overrides vram_limit calculation."></div>
         <div><label style="color:#888">vram_limit (GB)</label><input id="llm-setup-vram" type="number" min="-1" max="1024" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="-1 = no limit"></div>
         <div><label style="color:#888">n_cpu_moe</label><input id="llm-setup-cpu-moe" type="number" min="0" max="512" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Keep MoE expert weights on CPU. For Qwen3.6-35B try 34."></div>
+        <!-- Col 2: load params -->
         <div><label style="color:#888">cache_type_k</label><select id="llm-setup-ctk" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px">
           <option value="default">default</option>
           <option value="f16">f16</option>
@@ -216,13 +246,44 @@ function createPanel() {
         <div><label style="color:#888">n_seq_max</label><input id="llm-setup-seq" type="number" min="1" max="32" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Max parallel sequences for batched VLM."></div>
         <div><label style="color:#888">image_min_tokens</label><input id="llm-setup-img-min" type="number" min="0" max="4096" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Minimum image tokens. 1024 recommended for Qwen-VL."></div>
         <div><label style="color:#888">image_max_tokens</label><input id="llm-setup-img-max" type="number" min="0" max="4096" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="Maximum image tokens. 4096 recommended for Qwen-VL."></div>
+        <!-- 工具参数已移至下方 Harness 单行（Enable / Wiki path / Max rounds） -->
+      </div>
+      <div style="display:flex;align-items:center;padding:6px 10px;gap:8px;border-top:1px solid var(--border-color,#333);flex-shrink:0;font-size:11px">
+        <label style="display:flex;align-items:center;gap:6px;color:#4a6;cursor:pointer;flex-shrink:0;font-size:11px" title="Harness 工具层开关：控制下方 Wiki path / Max rounds 是否生效">
+          <input id="llm-setup-tools-enable" type="checkbox" style="accent-color:var(--primary,#4a6);transform:scale(1.2)">
+          ✅ Enable
+        </label>
+        <label style="color:#888;flex-shrink:0">Wiki path</label>
+        <input id="llm-setup-wiki-path" type="text" style="flex:1;min-width:0;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="e.g. F:/wiki">
+        <label style="color:#888;flex-shrink:0">Max rounds</label>
+        <input id="llm-setup-max-rounds" type="number" min="1" max="50" style="width:64px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="How many tool call cycles before forced final answer.">
       </div>
       <div id="llm-setup-status" style="padding:8px 10px;font-size:11px;border-top:1px solid var(--border-color,#333);flex-shrink:0">
         <span id="llm-setup-loaded" style="color:#888">No model loaded</span>
       </div>
-      <div style="padding:8px 10px;flex-shrink:0">
-        <button id="llm-setup-apply" style="width:100%;padding:8px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">Apply &amp; Reload</button>
+      <div style="display:flex;padding:8px 10px;gap:6px;flex-shrink:0">
+        <button id="llm-setup-apply" style="flex:1;padding:8px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">Apply &amp; Reload</button>
+        <button id="llm-setup-unload" style="padding:8px 14px;background:#633;color:#faa;border:1px solid #844;border-radius:4px;cursor:pointer;font-size:13px">Unload</button>
       </div>
+    </div>
+
+    <!-- Gen tab (提示词生成系统：阶段0程序路由 + 阶段1 LLM组装) -->
+    <div id="llm-gen-panel" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div style="padding:6px 10px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0;font-size:11px;color:#888">
+        Wiki 路径：使用 Setup 标签的 Wiki path（harness）
+      </div>
+      <div style="padding:8px 10px;flex-shrink:0;font-size:11px;color:#888">
+        描述一个画面（一次一个，别写数量）。避免用"提示词"字眼，直接说画面内容。
+      </div>
+      <textarea id="llm-gen-intent" placeholder="例如：校园教室窗边午后，女学生坐在课桌上看窗外&#10;例如：夜景名媛，顶层套房落地窗前，冷色调" style="flex:0 0 auto;height:70px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:8px;resize:none;font-size:12px;font-family:inherit;margin:0 10px 8px;border-radius:4px"></textarea>
+      <div style="display:flex;padding:0 10px 8px;gap:6px;flex-shrink:0">
+        <button id="llm-gen-run" style="flex:1;padding:8px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">🎨 生成提示词</button>
+        <button id="llm-gen-copy" style="padding:8px 12px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:12px">Copy</button>
+        <button id="llm-gen-desc" style="padding:8px 12px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:12px" title="将结果追加到 Describe">→ Desc</button>
+        <button id="llm-gen-clear" style="padding:8px 12px;background:#633;color:#faa;border:1px solid #844;border-radius:4px;cursor:pointer;font-size:12px" title="清空结果区（不清历史）">Clear</button>
+      </div>
+      <div id="llm-gen-meta" style="padding:2px 10px;font-size:10px;color:#888;flex-shrink:0;min-height:14px"></div>
+      <div id="llm-gen-result" style="flex:1;overflow-y:auto;padding:8px 10px;min-height:0;background:var(--bg-color,#1a2a1a);border-top:1px solid var(--border-color,#333);white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5"></div>
     </div>
     `;
 
@@ -235,7 +296,18 @@ function bindEvents() {
     panel.querySelector("#llm-tab-chat").onclick = () => switchTab("chat");
     panel.querySelector("#llm-tab-desc").onclick = () => switchTab("desc");
     panel.querySelector("#llm-tab-sys").onclick = () => switchTab("sys");
+    panel.querySelector("#llm-tab-gen").onclick = () => switchTab("gen");
     panel.querySelector("#llm-tab-setup").onclick = () => switchTab("setup");
+    panel.querySelector("#llm-gen-run").onclick = generatePrompt;
+    panel.querySelector("#llm-gen-copy").onclick = copyGenResult;
+    panel.querySelector("#llm-gen-desc").onclick = genToDescribe;
+    panel.querySelector("#llm-gen-clear").onclick = clearGenResult;
+    panel.querySelector("#llm-gen-intent").onkeydown = (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            generatePrompt();
+        }
+    };
     panel.querySelector("#llm-close").onclick = togglePanel;
 
     // Chat
@@ -247,30 +319,35 @@ function bindEvents() {
         }
     };
     panel.querySelector("#llm-unload").onclick = unloadModel;
-    panel.querySelector("#llm-unload-bottom").onclick = unloadModel;
     panel.querySelector("#llm-clear-chat").onclick = clearChat;
     panel.querySelector("#llm-new").onclick = newChat;
 
-    // Model selector
-    const modelSel = panel.querySelector("#llm-model-select");
-    modelSel.onchange = () => {
-        selectedModel = modelSel.value;
-        saveState();
-    };
+    // Setup model selector (全局唯一加载入口)
+    const modelSel = panel.querySelector("#llm-setup-model-select");
+    if (modelSel) {
+        modelSel.onchange = () => {
+            selectedModel = modelSel.value;
+            saveState();
+        };
+    }
 
-    // Handler selector
-    const handlerSel = panel.querySelector("#llm-handler-select");
-    handlerSel.onchange = () => {
-        selectedHandler = handlerSel.value;
-        saveState();
-    };
+    // Setup handler selector
+    const handlerSel = panel.querySelector("#llm-setup-handler-select");
+    if (handlerSel) {
+        handlerSel.onchange = () => {
+            selectedHandler = handlerSel.value;
+            saveState();
+        };
+    }
 
-    // mmproj selector
-    const mmprojSel = panel.querySelector("#llm-mmproj-select");
-    mmprojSel.onchange = () => {
-        selectedMmproj = mmprojSel.value;
-        saveState();
-    };
+    // Setup mmproj selector
+    const mmprojSel = panel.querySelector("#llm-setup-mmproj-select");
+    if (mmprojSel) {
+        mmprojSel.onchange = () => {
+            selectedMmproj = mmprojSel.value;
+            saveState();
+        };
+    }
 
     // Describe
     panel.querySelector("#llm-desc-send").onclick = describeToChat;
@@ -351,8 +428,26 @@ function bindEvents() {
         ctvEl.onchange = () => { cacheTypeV = ctvEl.value; saveState(); };
     }
 
-    // Apply & Reload
+    // Tool params (Setup tab)
+    const toolsEnableEl = panel.querySelector("#llm-setup-tools-enable");
+    if (toolsEnableEl) {
+        toolsEnableEl.checked = toolsEnabled;
+        toolsEnableEl.onchange = () => { toolsEnabled = toolsEnableEl.checked; saveState(); };
+    }
+    const wikiPathEl = panel.querySelector("#llm-setup-wiki-path");
+    if (wikiPathEl) {
+        wikiPathEl.value = wikiPath;
+        wikiPathEl.oninput = () => { wikiPath = wikiPathEl.value; saveState(); };
+    }
+    const maxRoundsEl = panel.querySelector("#llm-setup-max-rounds");
+    if (maxRoundsEl) {
+        maxRoundsEl.value = maxToolRounds;
+        maxRoundsEl.oninput = () => { maxToolRounds = parseInt(maxRoundsEl.value) || 10; saveState(); };
+    }
+
+    // Apply & Reload + Unload
     panel.querySelector("#llm-setup-apply").onclick = applySettings;
+    panel.querySelector("#llm-setup-unload").onclick = unloadModel;
 }
 
 // ---- Tab switching ----
@@ -361,13 +456,16 @@ function switchTab(tab) {
     panel.querySelector("#llm-tab-chat").classList.toggle("active", tab === "chat");
     panel.querySelector("#llm-tab-desc").classList.toggle("active", tab === "desc");
     panel.querySelector("#llm-tab-sys").classList.toggle("active", tab === "sys");
+    panel.querySelector("#llm-tab-gen").classList.toggle("active", tab === "gen");
     panel.querySelector("#llm-tab-setup").classList.toggle("active", tab === "setup");
     panel.querySelector("#llm-chat-panel").style.display = tab === "chat" ? "flex" : "none";
     panel.querySelector("#llm-desc-panel").style.display = tab === "desc" ? "flex" : "none";
     panel.querySelector("#llm-sys-panel").style.display = tab === "sys" ? "flex" : "none";
+    panel.querySelector("#llm-gen-panel").style.display = tab === "gen" ? "flex" : "none";
     panel.querySelector("#llm-setup-panel").style.display = tab === "setup" ? "flex" : "none";
-    if (tab === "chat") { refreshModels(); updateChatUI(); }
+    if (tab === "chat") { refreshModels(); updateChatUI(); updateContextDisplay(); updateCurrentModelDisplay(); }
     if (tab === "desc") updateDescribeUI();
+    if (tab === "gen") updateGenUI();
     if (tab === "setup") updateSetupUI();
 }
 
@@ -393,8 +491,11 @@ function togglePanel() {
         if (activeTab === "chat") {
             refreshModels();
             updateChatUI();
+            updateCurrentModelDisplay();
         } else if (activeTab === "desc") {
             updateDescribeUI();
+        } else if (activeTab === "gen") {
+            updateGenUI();
         } else if (activeTab === "setup") {
             updateSetupUI();
         }
@@ -412,49 +513,55 @@ async function refreshModels() {
         allMmproj = data?.data?.mmproj || [];
         allHandlers = data?.data?.chat_handlers || ["None"];
 
-        // Update model dropdown
-        const sel = panel.querySelector("#llm-model-select");
-        sel.innerHTML = "";
-        for (const m of allModels) {
-            const opt = document.createElement("option");
-            opt.value = m;
-            opt.textContent = m;
-            if (m === selectedModel) opt.selected = true;
-            sel.appendChild(opt);
-        }
-        if (!selectedModel && allModels.length > 0) {
-            selectedModel = allModels[0];
-            sel.value = selectedModel;
-            saveState();
-        }
-
-        // Update handler dropdown
-        const handlerSel = panel.querySelector("#llm-handler-select");
-        handlerSel.innerHTML = "";
-        for (const h of allHandlers) {
-            const opt = document.createElement("option");
-            opt.value = h;
-            opt.textContent = h;
-            if (h === selectedHandler) opt.selected = true;
-            handlerSel.appendChild(opt);
-        }
-        if (!allHandlers.includes(selectedHandler)) {
-            selectedHandler = "None";
-            handlerSel.value = "None";
-            saveState();
+        // Update Setup model dropdown
+        const sel = panel.querySelector("#llm-setup-model-select");
+        if (sel) {
+            sel.innerHTML = "";
+            for (const m of allModels) {
+                const opt = document.createElement("option");
+                opt.value = m;
+                opt.textContent = m;
+                if (m === selectedModel) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            if (!selectedModel && allModels.length > 0) {
+                selectedModel = allModels[0];
+                sel.value = selectedModel;
+                saveState();
+            }
         }
 
-        // Update mmproj dropdown
-        const mmprojSel = panel.querySelector("#llm-mmproj-select");
-        mmprojSel.innerHTML = '<option value="None">mmproj: None</option>';
-        for (const m of allMmproj) {
-            const opt = document.createElement("option");
-            opt.value = m;
-            opt.textContent = m.replace(".gguf", "").replace(/mmproj/i, "mmp").substring(0, 28);
-            if (m === selectedMmproj) opt.selected = true;
-            mmprojSel.appendChild(opt);
+        // Update Setup handler dropdown
+        const handlerSel = panel.querySelector("#llm-setup-handler-select");
+        if (handlerSel) {
+            handlerSel.innerHTML = "";
+            for (const h of allHandlers) {
+                const opt = document.createElement("option");
+                opt.value = h;
+                opt.textContent = h;
+                if (h === selectedHandler) opt.selected = true;
+                handlerSel.appendChild(opt);
+            }
+            if (!allHandlers.includes(selectedHandler)) {
+                selectedHandler = "None";
+                handlerSel.value = "None";
+                saveState();
+            }
         }
-        if (selectedMmproj && selectedMmproj !== "None") mmprojSel.value = selectedMmproj;
+
+        // Update Setup mmproj dropdown
+        const mmprojSel = panel.querySelector("#llm-setup-mmproj-select");
+        if (mmprojSel) {
+            mmprojSel.innerHTML = '<option value="None">mmproj: None</option>';
+            for (const m of allMmproj) {
+                const opt = document.createElement("option");
+                opt.value = m;
+                opt.textContent = m.replace(".gguf", "").replace(/mmproj/i, "mmp").substring(0, 28);
+                if (m === selectedMmproj) opt.selected = true;
+                mmprojSel.appendChild(opt);
+            }
+            if (selectedMmproj && selectedMmproj !== "None") mmprojSel.value = selectedMmproj;
+        }
     } catch (e) {
         console.error("LlmSidebar: failed to load models", e);
     }
@@ -491,7 +598,7 @@ async function updateSetupUI() {
             const loadedEl = panel.querySelector("#llm-setup-loaded");
             if (d.loaded && d.current_config) {
                 const cfg = d.current_config;
-                loadedEl.innerHTML = '<span style="color:#4a6">● Model loaded</span> ' +
+                loadedEl.innerHTML = '<span style="color:#4a6">Model loaded</span> ' +
                     '<span style="color:#aaa">' + (d.loaded_model || "?") + '</span>';
                 // Fill fields with current loaded values
                 const ctkEl = panel.querySelector("#llm-setup-ctk");
@@ -506,7 +613,7 @@ async function updateSetupUI() {
                 if (ctkEl) ctkEl.value = cfg.cache_type_k || "default";
                 if (ctvEl) ctvEl.value = cfg.cache_type_v || "default";
             } else {
-                loadedEl.innerHTML = '<span style="color:#888">○ No model loaded</span>';
+                loadedEl.innerHTML = '<span style="color:#888">No model loaded</span>';
                 // Restore our saved values
                 panel.querySelector("#llm-setup-ctx").value = nCtx;
                 panel.querySelector("#llm-setup-gpu").value = nGpuLayers;
@@ -519,6 +626,13 @@ async function updateSetupUI() {
                 const ctvEl = panel.querySelector("#llm-setup-ctv");
                 if (ctkEl) ctkEl.value = cacheTypeK;
                 if (ctvEl) ctvEl.value = cacheTypeV;
+                // Restore tool fields
+                const teEl = panel.querySelector("#llm-setup-tools-enable");
+                if (teEl) teEl.checked = toolsEnabled;
+                const wpEl = panel.querySelector("#llm-setup-wiki-path");
+                if (wpEl) wpEl.value = wikiPath;
+                const mrEl = panel.querySelector("#llm-setup-max-rounds");
+                if (mrEl) mrEl.value = maxToolRounds;
             }
         }
     } catch (e) {
@@ -528,7 +642,7 @@ async function updateSetupUI() {
 
 async function applySettings() {
     if (!selectedModel) {
-        alert("Select a model in the Chat tab first.");
+        alert("请先在 Setup 标签选择模型");
         return;
     }
     const btn = panel.querySelector("#llm-setup-apply");
@@ -552,17 +666,22 @@ async function applySettings() {
                 n_seq_max: nSeqMax,
                 image_min_tokens: imageMinTokens,
                 image_max_tokens: imageMaxTokens,
+                tools_enabled: toolsEnabled,
+                wiki_path: wikiPath,
+                max_tool_rounds: maxToolRounds,
+                tool_result_max_chars: toolResultMaxChars,
             }),
         });
         const data = await resp.json();
         if (data?.success) {
-            btn.textContent = "✓ Reloaded";
+            btn.textContent = "Reloaded";
             btn.style.background = "#484";
             setTimeout(() => {
                 btn.textContent = "Apply & Reload";
                 btn.style.background = "";
             }, 2000);
             updateSetupUI();
+            updateCurrentModelDisplay();
         } else {
             btn.textContent = "Apply & Reload";
             btn.disabled = false;
@@ -576,6 +695,26 @@ async function applySettings() {
 }
 
 // ---- Chat ----
+async function updateCurrentModelDisplay() {
+    try {
+        const resp = await fetch("/llm-sidebar/status");
+        const data = await resp.json();
+        const el = panel.querySelector("#llm-current-model");
+        if (!el) return;
+        if (data?.success && data.data.loaded && data.data.current_config) {
+            const d = data.data;
+            const h = d.current_config.chat_handler;
+            el.textContent = (h && h !== "None") ? (d.loaded_model + " · " + h) : d.loaded_model;
+            el.style.color = "#4a6";
+            el.title = "当前载入模型（Setup 标签选择与加载）";
+        } else {
+            el.textContent = "未加载";
+            el.style.color = "#888";
+            el.title = "模型未加载。在 Setup 选择模型后 Apply，或直接发送消息自动重载";
+        }
+    } catch (e) {}
+}
+
 function updateChatUI() {
     const container = panel.querySelector("#llm-messages");
     container.innerHTML = "";
@@ -601,7 +740,7 @@ function appendMessageDOM(container, role, content) {
     });
     const label = document.createElement("div");
     label.style.cssText = "font-size:10px;color:#888;margin-bottom:4px";
-    label.textContent = isUser ? "👤 You" : "🤖 LLM";
+    label.textContent = isUser ? ">> You" : ">> LLM";
     div.appendChild(label);
     const text = document.createElement("div");
     text.textContent = content;
@@ -618,6 +757,104 @@ function appendMessageDOM(container, role, content) {
     div.appendChild(btn);
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+}
+
+// ---- Gen tab (提示词生成系统) ----
+function updateGenUI() {
+    const intentEl = panel.querySelector("#llm-gen-intent");
+    if (intentEl && genIntent && intentEl.value !== genIntent) intentEl.value = genIntent;
+    renderGenResult();
+}
+
+function renderGenResult() {
+    const box = panel.querySelector("#llm-gen-result");
+    const meta = panel.querySelector("#llm-gen-meta");
+    if (!box || !meta) return;
+    if (!genResult) {
+        box.textContent = "（结果区：输入意图后点击「生成提示词」）";
+        meta.textContent = "";
+        return;
+    }
+    if (genResult.error) {
+        box.textContent = "❌ " + genResult.error;
+        // 路由空洞时显示相近条目建议
+        if (genResult.suggestions && genResult.suggestions.length) {
+            box.textContent += "\n\n相近条目（可参考这些词重新描述）：\n" +
+                genResult.suggestions.map(s => "  · " + s).join("\n");
+        }
+        meta.textContent = "error";
+        return;
+    }
+    const r = genResult;
+    let metaText = "mode: " + (r.mode || "?");
+    if (r.rounds) metaText += " | rounds: " + r.rounds;
+    if (r.hard_conflicts && r.hard_conflicts.length) metaText += " | ⚠️ 冲突: " + r.hard_conflicts.join("; ");
+    if (r.candidates && r.candidates.length) metaText += " | 候选: " + r.candidates.length + " 文件";
+    meta.textContent = metaText;
+    box.textContent = r.prompt || "(空输出)";
+}
+
+async function generatePrompt() {
+    if (genBusy) return;
+    const intentEl = panel.querySelector("#llm-gen-intent");
+    genIntent = (intentEl.value || "").trim();
+    if (!genIntent) { alert("请输入用户意图"); return; }
+    if (!wikiPath) { alert("请在 Setup 标签设置 Wiki path（harness）"); return; }
+    if (!selectedModel) { alert("请在 Setup 标签选择模型"); return; }
+    saveState();
+
+    genBusy = true;
+    const box = panel.querySelector("#llm-gen-result");
+    const runBtn = panel.querySelector("#llm-gen-run");
+    box.textContent = "⏳ 阶段0 路由 wiki ...";
+    runBtn.disabled = true;
+
+    try {
+        const resp = await fetch("/llm-sidebar/generate-prompt", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                model: selectedModel,
+                intent: genIntent,
+                wiki_path: wikiPath,
+                system_prompt: systemPromptEnabled ? systemPrompt : "",
+                chat_handler: selectedHandler,
+                mmproj_file: selectedMmproj || "None",
+                options: buildOptions(),
+                fallback: true,
+            }),
+        });
+        const data = await resp.json();
+        genResult = data?.data || { error: (data?.error || "unknown error") };
+        renderGenResult();
+    } catch (e) {
+        genResult = { error: e.message };
+        renderGenResult();
+    }
+    genBusy = false;
+    runBtn.disabled = false;
+}
+
+function clearGenResult() {
+    genResult = null;
+    renderGenResult();
+}
+
+function copyGenResult() {
+    if (!genResult || !genResult.prompt) return;
+    navigator.clipboard?.writeText(genResult.prompt).then(() => {
+        const btn = panel.querySelector("#llm-gen-copy");
+        if (btn) { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1200); }
+    }).catch(() => {});
+}
+
+function genToDescribe() {
+    if (!genResult || !genResult.prompt) return;
+    if (describeText) describeText += "\n\n";
+    describeText += genResult.prompt;
+    updateDescribeUI();
+    saveState();
+    switchTab("desc");
 }
 
 async function sendMessage() {
@@ -648,6 +885,10 @@ async function sendMessage() {
                 chat_handler: selectedHandler,
                 mmproj_file: selectedMmproj || "None",
                 options: buildOptions(),
+                tools_enabled: toolsEnabled,
+                wiki_path: wikiPath,
+                max_tool_rounds: maxToolRounds,
+                tool_result_max_chars: toolResultMaxChars,
             }),
         });
 
@@ -683,6 +924,8 @@ async function sendMessage() {
     }
 
     saveState();
+    updateContextDisplay();
+    updateCurrentModelDisplay();
     input.disabled = false;
     panel.querySelector("#llm-send").disabled = false;
     input.focus();
@@ -691,8 +934,9 @@ async function sendMessage() {
 async function unloadModel() {
     try {
         await fetch("/llm-sidebar/unload", { method: "POST" });
-        chatHistory.push({ role: "system", content: "🔄 Model unloaded. Select a model and send a message to reload." });
+        chatHistory.push({ role: "system", content: "🧹 Model unloaded. 在 Setup 标签选择模型后 Apply，或直接发送消息自动重载。" });
         updateChatUI();
+        updateCurrentModelDisplay();
         saveState();
     } catch (e) {
         console.error("LlmSidebar: unload failed", e);
@@ -703,6 +947,7 @@ function clearChat() {
     chatHistory = [];
     updateChatUI();
     saveState();
+    updateContextDisplay();
 }
 
 async function newChat() {
@@ -740,6 +985,32 @@ function describeToChat() {
     input.focus();
 }
 
+// ---- Context display ----
+async function updateContextDisplay() {
+    try {
+        const resp = await fetch("/llm-sidebar/status");
+        const data = await resp.json();
+        if (data?.success) {
+            const d = data.data;
+            contextTokens = d.context_tokens || 0;
+            contextLimit = d.context_limit || 8192;
+            const el = document.getElementById("llm-ctx-bar");
+            if (el) {
+                const pct = contextLimit > 0 ? (contextTokens / contextLimit * 100) : 0;
+                const txt = "ctx: " + contextTokens + "/" + contextLimit + " tok (" + pct.toFixed(1) + "%)";
+                el.textContent = txt;
+                if (pct > 80) {
+                    el.style.color = "#f55";
+                } else if (pct > 60) {
+                    el.style.color = "#fa5";
+                } else {
+                    el.style.color = "#888";
+                }
+            }
+        }
+    } catch (e) {}
+}
+
 // ---- Right-click integration entry point (called from rightClick.js) ----
 function onRightClickDescribe(text) {
     appendToDescribe(text);
@@ -747,11 +1018,11 @@ function onRightClickDescribe(text) {
 
 function onRightClickVision(images, filename) {
     if (!selectedModel) {
-        alert("Select a model in the LLM sidebar first.");
+        alert("请先在 Setup 标签选择模型");
         return;
     }
     if (selectedHandler === "None") {
-        alert("Select a chat_handler in the LLM sidebar for vision.\nOptions: Qwen3.5, Qwen3-VL, Qwen2.5-VL, etc.");
+        alert("请先在 Setup 标签选择 chat_handler（视觉需要非 None handler，如 Qwen3.5 / Qwen3-VL）。");
         togglePanel();
         return;
     }
@@ -763,7 +1034,7 @@ function onRightClickVision(images, filename) {
 
 async function visionDescribe(images, prompt) {
     try {
-        chatHistory.push({ role: "system", content: "🔍 Analyzing image..." });
+        chatHistory.push({ role: "system", content: " Analyzing image..." });
         updateChatUI();
 
         const resp = await fetch("/llm-sidebar/vision", {
@@ -804,7 +1075,7 @@ async function visionDescribe(images, prompt) {
 function createToggleButton() {
     const btn = document.createElement("button");
     btn.id = "llm-sidebar-btn";
-    btn.textContent = "💬 LLM";
+    btn.textContent = "📝 LLM";
     btn.title = "Toggle LLM Sidebar (drag to reposition, click to open)";
 
     let pos = { x: -1, y: -1 };

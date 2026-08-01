@@ -103,6 +103,53 @@ def register_routes(prompt_server, llm_module):
             _log.exception("chat/stream error")
             return web.json_response({"success": False, "error": str(e)}, status=500)
 
+    # ---- POST /llm-sidebar/generate-prompt ----
+    @prompt_server.routes.post("/llm-sidebar/generate-prompt")
+    async def generate_prompt_handler(request):
+        """提示词生成系统：阶段 0 程序路由 + 阶段 1 LLM 一次组装。
+
+        body: {
+          "model": "...",
+          "intent": "用户意图",
+          "wiki_path": "N:\\...\\wiki目录",
+          "system_prompt": "...",        # 可选，覆盖默认输出协议
+          "chat_handler": "None",
+          "mmproj_file": "None",
+          "options": {...},               # 推理参数
+          "fallback": true,               # 可选，LLM 失败时程序直出
+        }
+        返回 JSON（含 prompt / mode / route）。
+        """
+        try:
+            data = await request.json()
+            model = data.get("model", "")
+            intent = data.get("intent", "")
+            wiki_path = data.get("wiki_path", "")
+            if not model or not intent or not wiki_path:
+                return web.json_response(
+                    {"success": False,
+                     "error": "model, intent, wiki_path are required"},
+                    status=400)
+
+            system_prompt = data.get("system_prompt", "")
+            chat_handler = data.get("chat_handler", "None")
+            mmproj = data.get("mmproj_file", "None")
+            options = data.get("options", None)
+            fallback = data.get("fallback", True)
+
+            result = _llm.generate_prompt(
+                model, intent, wiki_path,
+                system_prompt=system_prompt,
+                chat_handler=chat_handler,
+                mmproj=mmproj,
+                options=options,
+                fallback=bool(fallback),
+            )
+            return web.json_response({"success": True, "data": result})
+        except Exception as e:
+            _log.exception("generate-prompt error")
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
     # ---- POST /llm-sidebar/vision ----
     @prompt_server.routes.post("/llm-sidebar/vision")
     async def vision_handler(request):
@@ -211,6 +258,10 @@ def register_routes(prompt_server, llm_module):
                 cache_type_v=str(data.get("cache_type_v", "default")),
                 n_cpu_moe=int(data.get("n_cpu_moe", 0)),
                 n_seq_max=int(data.get("n_seq_max", 1)),
+                tools_enabled=data.get("tools_enabled"),
+                wiki_path=data.get("wiki_path"),
+                max_rounds=data.get("max_tool_rounds"),
+                result_max_chars=data.get("tool_result_max_chars"),
             )
             return web.json_response({"success": True, "data": {"loaded": True}})
         except Exception as e:
