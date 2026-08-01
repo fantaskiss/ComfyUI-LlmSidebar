@@ -679,6 +679,7 @@ async function applySettings() {
             setTimeout(() => {
                 btn.textContent = "Apply & Reload";
                 btn.style.background = "";
+                btn.disabled = false;
             }, 2000);
             updateSetupUI();
             updateCurrentModelDisplay();
