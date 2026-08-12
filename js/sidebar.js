@@ -171,16 +171,16 @@ function createPanel() {
       </div>
       <div id="llm-messages" style="flex:1;overflow-y:auto;padding:8px;min-height:0"></div>
       <div id="llm-ctx-bar" style="padding:2px 10px;font-size:10px;color:#666;text-align:right;flex-shrink:0;border-top:1px solid var(--border-color,#333)">ctx: --/--</div>
-      <div style="display:flex;padding:8px;gap:6px;border-top:none;flex-shrink:0">
-        <textarea id="llm-input" rows="2" placeholder="Ask something..." style="flex:1;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:6px;resize:none;font-size:12px;font-family:inherit"></textarea>
-        <button id="llm-send" style="padding:6px 14px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">Send</button>
-        <button id="llm-new" style="padding:6px 10px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:12px">New</button>
+      <div style="display:flex;padding:8px;gap:6px;border-top:none;flex:0 0 33.33%;min-height:0">
+        <textarea id="llm-input" rows="2" placeholder="Ask something..." style="flex:1;height:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:6px;resize:none;font-size:16px;font-family:inherit"></textarea>
+        <button id="llm-send" style="align-self:flex-end;padding:6px 14px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">Send</button>
+        <button id="llm-new" style="align-self:flex-end;padding:6px 10px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:12px">New</button>
       </div>
     </div>
 
     <!-- Describe tab -->
     <div id="llm-desc-panel" style="display:none;flex-direction:column;flex:1;min-height:0">
-      <textarea id="llm-desc-textarea" placeholder="Paste and compose your prompt here.&#10;Use [-> Describe] buttons in Chat to append messages." style="flex:1;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:none;padding:10px;resize:none;font-size:12px;font-family:inherit;min-height:0"></textarea>
+      <textarea id="llm-desc-textarea" placeholder="Paste and compose your prompt here.&#10;Use [-> Describe] buttons in Chat to append messages." style="flex:1;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:none;padding:10px;resize:none;font-size:16px;font-family:inherit;min-height:0"></textarea>
       <div style="display:flex;padding:8px;gap:6px;border-top:1px solid var(--border-color,#333);flex-shrink:0">
         <button id="llm-desc-send" style="flex:1;padding:8px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">Send to Chat</button>
         <button id="llm-desc-clear" style="padding:8px 14px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer">Clear</button>
@@ -275,7 +275,7 @@ function createPanel() {
       <div style="padding:8px 10px;flex-shrink:0;font-size:11px;color:#888">
         描述一个画面（一次一个，别写数量）。避免用"提示词"字眼，直接说画面内容。
       </div>
-      <textarea id="llm-gen-intent" placeholder="例如：校园教室窗边午后，女学生坐在课桌上看窗外&#10;例如：夜景名媛，顶层套房落地窗前，冷色调" style="flex:0 0 auto;height:70px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:8px;resize:none;font-size:12px;font-family:inherit;margin:0 10px 8px;border-radius:4px"></textarea>
+      <textarea id="llm-gen-intent" placeholder="例如：校园教室窗边午后，女学生坐在课桌上看窗外&#10;例如：夜景名媛，顶层套房落地窗前，冷色调" style="flex:0 0 33.33%;min-height:70px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:8px;resize:none;font-size:16px;font-family:inherit;margin:0 10px 8px;border-radius:4px"></textarea>
       <div style="display:flex;padding:0 10px 8px;gap:6px;flex-shrink:0">
         <button id="llm-gen-run" style="flex:1;padding:8px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">🎨 生成提示词</button>
         <button id="llm-gen-copy" style="padding:8px 12px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:12px">Copy</button>
@@ -283,7 +283,7 @@ function createPanel() {
         <button id="llm-gen-clear" style="padding:8px 12px;background:#633;color:#faa;border:1px solid #844;border-radius:4px;cursor:pointer;font-size:12px" title="清空结果区（不清历史）">Clear</button>
       </div>
       <div id="llm-gen-meta" style="padding:2px 10px;font-size:10px;color:#888;flex-shrink:0;min-height:14px"></div>
-      <div id="llm-gen-result" style="flex:1;overflow-y:auto;padding:8px 10px;min-height:0;background:var(--bg-color,#1a2a1a);border-top:1px solid var(--border-color,#333);white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5"></div>
+      <div id="llm-gen-result" style="flex:1;overflow-y:auto;padding:8px 10px;min-height:0;background:var(--bg-color,#1a2a1a);border-top:1px solid var(--border-color,#333);white-space:pre-wrap;word-break:break-word;font-size:16px;line-height:1.5"></div>
     </div>
     `;
 
@@ -736,7 +736,7 @@ function appendMessageDOM(container, role, content) {
         borderLeft: isUser ? "3px solid var(--primary, #4a6)" : "3px solid #666",
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
-        fontSize: "12px",
+        fontSize: "16px",
         lineHeight: "1.4",
     });
     const label = document.createElement("div");

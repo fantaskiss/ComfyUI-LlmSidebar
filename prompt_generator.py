@@ -42,8 +42,14 @@ def _read_candidates(wiki_path: str, route_result: dict,
     剩余预算按候选文件数均分——防止多文件注入撑爆 context。
     """
     contents: dict[str, str] = {}
-    always = route_result.get("always_include", [])
+    always = list(route_result.get("always_include", []))
     candidates = route_result.get("candidates", [])
+
+    # 硬约束：index.md 必须读（LLM 全局地图）。不依赖 conflicts.json 配置——
+    # 即使 always_include 没配 index，也强制注入。大小写容错（INDEX.md/index.md）。
+    # 2026-08-07 入口统一约定：index.md = LLM 入口，README.md = 人类入口。
+    if not any(rel.lower() == "index.md" for rel in always):
+        always.insert(0, "index.md")
 
     # 常驻规则文件优先（每个最多 2500，共最多 len(always)*2500）
     for rel in always:

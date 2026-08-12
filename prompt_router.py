@@ -29,6 +29,13 @@ INDEX_FILENAME = "index.json"            # 每 wiki 一个，可由 build_index(
 CONFLICT_FILENAME = "conflicts.json"      # 每 wiki 一个（规则随库走，不合并）
 CONSTRAINT_FILENAME = "constraint_domains.json"  # 六轴约束域（可共享）
 
+# 排除名单：不参与索引/路由的文件（build_index 跳过）。
+# 用途：保留在 wiki 目录但不想被 LLM 路由命中的文件（如用户私人实验笔记）。
+# 按文件名匹配（含 .md），可加多个。
+EXCLUDE_FILES = {
+    "04-mode-selection.md",   # 2026-08-07 用户决定：模式选择由用户自己定，本地模型判断不可靠
+}
+
 DEFAULT_MAX_CANDIDATES = 6                # 候选文件上限
 DEFAULT_SCORE_FLOOR = 1                   # 低于此分不入选
 
@@ -101,6 +108,8 @@ def build_index(wiki_path: str, force: bool = False) -> Optional[dict]:
         for fn in sorted(files):
             if not fn.endswith(".md"):
                 continue
+            if fn in EXCLUDE_FILES:
+                continue  # 排除名单：不索引、不路由
             full = os.path.join(root, fn)
             rel = os.path.relpath(full, wiki).replace(os.sep, "/")
             try:
