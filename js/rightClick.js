@@ -76,11 +76,6 @@ async function describeImageNode(node) {
     if (!ensureSidebar()) return;
 
     const sidebar = window.LlmSidebar;
-    if (!sidebar.selectedModel) {
-        alert("Select a model in the ⚡ LLM sidebar first.");
-        sidebar.togglePanel();
-        return;
-    }
 
     // Try to get image from widget (LoadImage)
     const imageWidget = node.widgets?.find(
@@ -109,11 +104,6 @@ async function describeOutputImage(node) {
     if (!ensureSidebar()) return;
 
     const sidebar = window.LlmSidebar;
-    if (!sidebar.selectedModel) {
-        alert("Select a model in the ⚡ LLM sidebar first.");
-        sidebar.togglePanel();
-        return;
-    }
 
     const imageData = await getNodePreviewImage(node);
     if (imageData) {

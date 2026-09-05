@@ -45,6 +45,10 @@ let wikiPath = "";
 let maxToolRounds = 10;
 let toolResultMaxChars = 8000;
 
+// Remote backend (Setup tab): 小主机 llama.cpp
+let backendMode = "local";          // "local" | "remote"
+let remoteBaseUrl = "http://10.0.0.8:60000";
+
 // Gen tab (提示词生成系统)
 let genIntent = "";
 let genWikiPath = "";
@@ -60,10 +64,12 @@ let allMmproj = [];
 let allHandlers = ["None"];
 
 const STORAGE_KEY = "llm_sidebar";
-const VISION_PROMPT =
-    "Describe this image in detail. Focus on: subject, composition, lighting, " +
-    "color palette, style, mood, and any notable visual elements. " +
-    "Write as a prompt for AI image generation. Be concise and direct.";
+// 右键 "Describe with LLM" 的默认指令：英文生图向描述 + 【中文对照】
+const DESCRIBE_PROMPT =
+    "Describe this image in English, written as a prompt for AI image generation. " +
+    "Cover subject, composition, lighting, color palette, style, mood, and notable " +
+    "visual details. Be concise and direct. After the English description, output a " +
+    "complete Chinese translation prefixed with 【中文对照】.";
 
 // ---- persistence ----
 function loadState() {
@@ -93,6 +99,8 @@ function loadState() {
             nSeqMax = s.nSeqMax || 1;
             imageMinTokens = s.imageMinTokens || 1024;
             imageMaxTokens = s.imageMaxTokens || 4096;
+            backendMode = s.backendMode === "remote" ? "remote" : "local";
+            remoteBaseUrl = s.remoteBaseUrl || "http://10.0.0.8:60000";
             toolsEnabled = s.toolsEnabled === true;
             wikiPath = s.wikiPath || "";
             maxToolRounds = s.maxToolRounds || 10;
@@ -119,6 +127,7 @@ function saveState() {
             cacheTypeK, cacheTypeV,
             nCpuMoe, nSeqMax,
             imageMinTokens, imageMaxTokens,
+            backendMode, remoteBaseUrl,
             toolsEnabled, wikiPath, maxToolRounds, toolResultMaxChars,
             genIntent, genWikiPath,
         }));
@@ -213,7 +222,15 @@ function createPanel() {
         Model loading parameters. Used when no model is loaded yet.<br>
         After a model is loaded by a workflow node, sidebar reuses it as-is.
       </div>
-      <div style="display:flex;align-items:center;padding:6px 10px;gap:6px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;padding:6px 10px;gap:8px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;color:#4a6;cursor:pointer;flex-shrink:0;font-size:12px" title="勾选后 Chat / Gen / 右键描述全部改走小主机 llama.cpp（OpenAI 兼容 HTTP），本机不再加载 GGUF 模型；模型与上下文由服务端决定">
+          <input id="llm-setup-remote" type="checkbox" style="accent-color:var(--primary,#4a6);transform:scale(1.2)">
+          🖥️ 使用小主机 llama.cpp
+        </label>
+        <label style="color:#888;flex-shrink:0">URL</label>
+        <input id="llm-setup-remote-url" type="text" placeholder="http://10.0.0.8:60000" style="flex:1;min-width:0;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" title="小主机 llama.cpp 的 OpenAI 兼容服务地址">
+      </div>
+      <div id="llm-setup-model-box" style="display:flex;align-items:center;padding:6px 10px;gap:6px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0;flex-wrap:wrap">
         <select id="llm-setup-model-select" style="flex:2;min-width:140px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:4px;font-size:12px;border-radius:4px" title="模型（全局唯一加载入口）"></select>
         <select id="llm-setup-handler-select" style="flex:1;min-width:90px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:4px;font-size:11px;border-radius:4px" title="chat_handler（视觉模型需要，纯文本用 None）">
           <option value="None">handler: None</option>
@@ -345,6 +362,26 @@ function bindEvents() {
     if (mmprojSel) {
         mmprojSel.onchange = () => {
             selectedMmproj = mmprojSel.value;
+            saveState();
+        };
+    }
+
+    // Remote backend (小主机 llama.cpp)
+    const remoteEl = panel.querySelector("#llm-setup-remote");
+    if (remoteEl) {
+        remoteEl.checked = backendMode === "remote";
+        remoteEl.onchange = () => {
+            backendMode = remoteEl.checked ? "remote" : "local";
+            saveState();
+            updateBackendUI();
+            updateContextDisplay();
+        };
+    }
+    const remoteUrlEl = panel.querySelector("#llm-setup-remote-url");
+    if (remoteUrlEl) {
+        remoteUrlEl.value = remoteBaseUrl;
+        remoteUrlEl.oninput = () => {
+            remoteBaseUrl = remoteUrlEl.value.trim() || "http://10.0.0.8:60000";
             saveState();
         };
     }
@@ -587,15 +624,47 @@ function buildOptions() {
     return opts;
 }
 
+// ---- Remote backend UI (小主机 llama.cpp) ----
+function updateBackendUI() {
+    const modelBox = panel.querySelector("#llm-setup-model-box");
+    const paramsGrid = panel.querySelector("#llm-setup-params");
+    const remote = backendMode === "remote";
+    if (modelBox) modelBox.style.display = remote ? "none" : "flex";
+    if (paramsGrid) paramsGrid.style.display = remote ? "none" : "grid";
+    const remoteEl = panel.querySelector("#llm-setup-remote");
+    if (remoteEl) remoteEl.checked = remote;
+}
+
+function statusUrl() {
+    const q = new URLSearchParams();
+    q.set("backend", backendMode);
+    if (backendMode === "remote") q.set("url", remoteBaseUrl);
+    return "/llm-sidebar/status?" + q.toString();
+}
+
 // ---- Setup tab ----
 async function updateSetupUI() {
+    updateBackendUI();
     // Fetch current status to show loaded config
     try {
-        const resp = await fetch("/llm-sidebar/status");
+        const resp = await fetch(statusUrl());
         const data = await resp.json();
         if (data?.success) {
             const d = data.data;
             const loadedEl = panel.querySelector("#llm-setup-loaded");
+            if (d.backend && d.backend.mode === "remote") {
+                const rinfo = d.remote_info || {};
+                if (d.loaded && rinfo.ready) {
+                    loadedEl.innerHTML = '<span style="color:#4a6">🖥️ Remote connected</span> ' +
+                        '<span style="color:#aaa">' + (rinfo.model || "?") + '</span>' +
+                        (rinfo.n_ctx ? ' <span style="color:#888">· ctx ' + rinfo.n_ctx + '</span>' : '');
+                } else {
+                    loadedEl.innerHTML = '<span style="color:#f55">🖥️ Remote unreachable</span>';
+                    if (rinfo.error) loadedEl.innerHTML += ' <span style="color:#888">' + rinfo.error + '</span>';
+                }
+                // 远程模式：不覆盖本地加载参数
+                return;
+            }
             if (d.loaded && d.current_config) {
                 const cfg = d.current_config;
                 loadedEl.innerHTML = '<span style="color:#4a6">Model loaded</span> ' +
@@ -641,8 +710,13 @@ async function updateSetupUI() {
 }
 
 async function applySettings() {
-    if (!selectedModel) {
+    const remote = backendMode === "remote";
+    if (!remote && !selectedModel) {
         alert("请先在 Setup 标签选择模型");
+        return;
+    }
+    if (remote && !remoteBaseUrl) {
+        alert("请先填写小主机 llama.cpp 的 URL");
         return;
     }
     const btn = panel.querySelector("#llm-setup-apply");
@@ -654,6 +728,8 @@ async function applySettings() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+                backend_mode: backendMode,
+                remote_url: remote ? remoteBaseUrl : "",
                 model: selectedModel,
                 chat_handler: selectedHandler,
                 mmproj: selectedMmproj || "None",
@@ -674,7 +750,7 @@ async function applySettings() {
         });
         const data = await resp.json();
         if (data?.success) {
-            btn.textContent = "Reloaded";
+            btn.textContent = remote ? "Connected" : "Reloaded";
             btn.style.background = "#484";
             setTimeout(() => {
                 btn.textContent = "Apply & Reload";
@@ -698,12 +774,26 @@ async function applySettings() {
 // ---- Chat ----
 async function updateCurrentModelDisplay() {
     try {
-        const resp = await fetch("/llm-sidebar/status");
+        const resp = await fetch(statusUrl());
         const data = await resp.json();
         const el = panel.querySelector("#llm-current-model");
         if (!el) return;
-        if (data?.success && data.data.loaded && data.data.current_config) {
-            const d = data.data;
+        if (!data?.success) return;
+        const d = data.data;
+        if (d.backend && d.backend.mode === "remote") {
+            const rinfo = d.remote_info || {};
+            if (d.loaded && rinfo.ready) {
+                el.textContent = "🖥️ " + (d.loaded_model || "?") + " · 小主机";
+                el.style.color = "#4a6";
+                el.title = "小主机 llama.cpp 远程模型（Setup 勾选远程后端）";
+            } else {
+                el.textContent = "🖥️ 远程不可达";
+                el.style.color = "#f55";
+                el.title = rinfo.error || "检查小主机 llama.cpp 是否已启动（桌面 bat）";
+            }
+            return;
+        }
+        if (d.loaded && d.current_config) {
             const h = d.current_config.chat_handler;
             el.textContent = (h && h !== "None") ? (d.loaded_model + " · " + h) : d.loaded_model;
             el.style.color = "#4a6";
@@ -801,7 +891,7 @@ async function generatePrompt() {
     genIntent = (intentEl.value || "").trim();
     if (!genIntent) { alert("请输入用户意图"); return; }
     if (!wikiPath) { alert("请在 Setup 标签设置 Wiki path（harness）"); return; }
-    if (!selectedModel) { alert("请在 Setup 标签选择模型"); return; }
+    if (backendMode !== "remote" && !selectedModel) { alert("请在 Setup 标签选择模型"); return; }
     saveState();
 
     genBusy = true;
@@ -815,6 +905,8 @@ async function generatePrompt() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+                backend_mode: backendMode,
+                remote_url: backendMode === "remote" ? remoteBaseUrl : "",
                 model: selectedModel,
                 intent: genIntent,
                 wiki_path: wikiPath,
@@ -861,7 +953,8 @@ function genToDescribe() {
 async function sendMessage() {
     const input = panel.querySelector("#llm-input");
     const text = input.value.trim();
-    if (!text || !selectedModel) return;
+    if (!text) return;
+    if (backendMode !== "remote" && !selectedModel) return;
     input.value = "";
     input.disabled = true;
     panel.querySelector("#llm-send").disabled = true;
@@ -880,6 +973,8 @@ async function sendMessage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+                backend_mode: backendMode,
+                remote_url: backendMode === "remote" ? remoteBaseUrl : "",
                 model: selectedModel,
                 prompt: text,
                 system_prompt: systemPromptEnabled ? systemPrompt : "",
@@ -906,6 +1001,7 @@ async function sendMessage() {
                 if (line.startsWith("data: ")) {
                     try {
                         const data = JSON.parse(line.slice(6));
+                        if (data.error) throw new Error(data.error);
                         if (data.chunk) full += data.chunk;
                         if (data.done && data.full_response) full = data.full_response;
                         if (lastText) lastText.textContent = full || "...";
@@ -934,8 +1030,17 @@ async function sendMessage() {
 
 async function unloadModel() {
     try {
-        await fetch("/llm-sidebar/unload", { method: "POST" });
-        chatHistory.push({ role: "system", content: "🧹 Model unloaded. 在 Setup 标签选择模型后 Apply，或直接发送消息自动重载。" });
+        await fetch("/llm-sidebar/unload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                backend_mode: backendMode,
+                remote_url: backendMode === "remote" ? remoteBaseUrl : "",
+            }),
+        });
+        chatHistory.push({ role: "system", content: backendMode === "remote"
+            ? "🧹 已清除对话。远程模型由小主机 llama.cpp 管理（桌面 bat 启停），不会卸载。"
+            : "🧹 Model unloaded. 在 Setup 标签选择模型后 Apply，或直接发送消息自动重载。" });
         updateChatUI();
         updateCurrentModelDisplay();
         saveState();
@@ -989,7 +1094,7 @@ function describeToChat() {
 // ---- Context display ----
 async function updateContextDisplay() {
     try {
-        const resp = await fetch("/llm-sidebar/status");
+        const resp = await fetch(statusUrl());
         const data = await resp.json();
         if (data?.success) {
             const d = data.data;
@@ -1018,18 +1123,24 @@ function onRightClickDescribe(text) {
 }
 
 function onRightClickVision(images, filename) {
-    if (!selectedModel) {
-        alert("请先在 Setup 标签选择模型");
+    const remote = backendMode === "remote";
+    if (!remote) {
+        if (!selectedModel) {
+            alert("请先在 Setup 标签选择模型");
+            return;
+        }
+        if (selectedHandler === "None") {
+            alert("请先在 Setup 标签选择 chat_handler（视觉需要非 None handler，如 Qwen3.5 / Qwen3-VL）。");
+            togglePanel();
+            return;
+        }
+    } else if (!remoteBaseUrl) {
+        alert("请先在 Setup 填写小主机 llama.cpp 的 URL");
         return;
     }
-    if (selectedHandler === "None") {
-        alert("请先在 Setup 标签选择 chat_handler（视觉需要非 None handler，如 Qwen3.5 / Qwen3-VL）。");
-        togglePanel();
-        return;
-    }
-    const prompt = systemPromptEnabled && systemPrompt
-        ? (filename ? `Describe this image.\nFilename: ${filename}` : "Describe this image.")
-        : (filename ? `${VISION_PROMPT}\n\nFilename: ${filename}` : VISION_PROMPT);
+    const prompt = filename
+        ? `${DESCRIBE_PROMPT}\n\nFilename: ${filename}`
+        : DESCRIBE_PROMPT;
     visionDescribe(images, prompt);
 }
 
@@ -1042,6 +1153,8 @@ async function visionDescribe(images, prompt) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+                backend_mode: backendMode,
+                remote_url: backendMode === "remote" ? remoteBaseUrl : "",
                 model: selectedModel,
                 images: images,
                 prompt: prompt,
@@ -1181,6 +1294,7 @@ function createToggleButton() {
                     createPanel();
                     createToggleButton();
                     refreshModels();
+                    updateBackendUI();
 
                     window.LlmSidebar = {
                         appendToDescribe,

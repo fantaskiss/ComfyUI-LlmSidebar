@@ -41,6 +41,11 @@ def register_routes(prompt_server, llm_module):
     @prompt_server.routes.get("/llm-sidebar/status")
     async def status_handler(request):
         try:
+            q = request.query
+            mode = q.get("backend")
+            url = q.get("url")
+            if mode:
+                _llm.set_backend(mode, url)
             return web.json_response({"success": True, "data": _llm.get_status()})
         except Exception as e:
             return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -68,9 +73,14 @@ def register_routes(prompt_server, llm_module):
             data = await request.json()
             model = data.get("model", "")
             prompt = data.get("prompt", "")
-            if not model or not prompt:
+            backend_mode = data.get("backend_mode", "local") or "local"
+            _llm.set_backend(backend_mode, data.get("remote_url"))
+            if backend_mode != "remote" and not model:
                 return web.json_response(
-                    {"success": False, "error": "model and prompt required"}, status=400)
+                    {"success": False, "error": "model required (local backend)"}, status=400)
+            if not prompt:
+                return web.json_response(
+                    {"success": False, "error": "prompt required"}, status=400)
 
             system_prompt = data.get("system_prompt", "")
             chat_handler = data.get("chat_handler", "None")
@@ -125,10 +135,17 @@ def register_routes(prompt_server, llm_module):
             model = data.get("model", "")
             intent = data.get("intent", "")
             wiki_path = data.get("wiki_path", "")
-            if not model or not intent or not wiki_path:
+            backend_mode = data.get("backend_mode", "local") or "local"
+            _llm.set_backend(backend_mode, data.get("remote_url"))
+            if backend_mode != "remote" and not model:
                 return web.json_response(
                     {"success": False,
-                     "error": "model, intent, wiki_path are required"},
+                     "error": "model required (local backend)"},
+                    status=400)
+            if not intent or not wiki_path:
+                return web.json_response(
+                    {"success": False,
+                     "error": "intent, wiki_path are required"},
                     status=400)
 
             system_prompt = data.get("system_prompt", "")
@@ -160,27 +177,27 @@ def register_routes(prompt_server, llm_module):
             prompt = data.get("prompt", "Describe this image in detail.")
             chat_handler = data.get("chat_handler", "None")
             mmproj = data.get("mmproj_file", "None")
+            backend_mode = data.get("backend_mode", "local") or "local"
+            _llm.set_backend(backend_mode, data.get("remote_url"))
 
-            if not model or not images:
+            if not images:
                 return web.json_response(
-                    {"success": False, "error": "model and images required"}, status=400)
+                    {"success": False, "error": "images required"}, status=400)
+            if backend_mode != "remote":
+                if not model:
+                    return web.json_response(
+                        {"success": False, "error": "model required (local backend)"}, status=400)
+                if chat_handler == "None":
+                    return web.json_response(
+                        {"success": False, "error": "Vision requires a chat_handler. Select one in the sidebar."},
+                        status=400)
 
-            if chat_handler == "None":
-                return web.json_response(
-                    {"success": False, "error": "Vision requires a chat_handler. Select one in the sidebar."},
-                    status=400)
-
-            # Resolve image paths
+            # Resolve image inputs: data URIs pass through as-is (keep original mime);
+            # short names -> real path (provider encodes file back to a data URI).
             resolved = []
-            import tempfile
             for img in images:
                 if isinstance(img, str) and img.startswith("data:image"):
-                    header, b64 = img.split(",", 1)
-                    raw = base64.b64decode(b64)
-                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                    tmp.write(raw)
-                    tmp.close()
-                    resolved.append(tmp.name)
+                    resolved.append(img)
                 elif isinstance(img, str) and not img.startswith("data:") and not os.path.isabs(img):
                     import folder_paths
                     full_path = folder_paths.get_annotated_filepath(img)
@@ -188,7 +205,7 @@ def register_routes(prompt_server, llm_module):
                         resolved.append(full_path)
                     else:
                         _log.warning("Image not found: %s (resolved: %s)", img, full_path)
-                elif isinstance(img, str):
+                elif isinstance(img, str) and os.path.isabs(img) and os.path.exists(img):
                     resolved.append(img)
 
             system_prompt = data.get("system_prompt", "")
@@ -202,14 +219,6 @@ def register_routes(prompt_server, llm_module):
                 options=options,
             )
 
-            # Clean up temp files
-            for p in resolved:
-                if p.startswith(tempfile.gettempdir()):
-                    try:
-                        os.unlink(p)
-                    except Exception:
-                        pass
-
             return web.json_response({"success": True, "data": {"response": result}})
 
         except Exception as e:
@@ -220,6 +229,12 @@ def register_routes(prompt_server, llm_module):
     @prompt_server.routes.post("/llm-sidebar/unload")
     async def unload_handler(request):
         try:
+            data = {}
+            try:
+                data = await request.json() or {}
+            except Exception:
+                data = {}
+            _llm.set_backend(data.get("backend_mode", "local"), data.get("remote_url"))
             _llm.unload_model()
             return web.json_response({"success": True, "data": {"loaded": False}})
         except Exception as e:
@@ -241,12 +256,16 @@ def register_routes(prompt_server, llm_module):
         try:
             data = await request.json()
             model = data.get("model", "")
-            if not model:
+            backend_mode = data.get("backend_mode", "local") or "local"
+            _llm.set_backend(backend_mode, data.get("remote_url"))
+            if backend_mode != "remote" and not model:
                 return web.json_response(
-                    {"success": False, "error": "model required"}, status=400)
+                    {"success": False, "error": "model required (local backend)"}, status=400)
 
             _llm.apply_settings(
                 model=model,
+                backend_mode=backend_mode,
+                remote_url=data.get("remote_url"),
                 chat_handler=data.get("chat_handler", "None"),
                 mmproj=data.get("mmproj", "None"),
                 n_ctx=int(data.get("n_ctx", 8192)),

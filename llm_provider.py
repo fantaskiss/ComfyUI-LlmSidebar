@@ -7,6 +7,10 @@ import os
 import sys
 import gc
 import base64
+import json
+import time
+import urllib.error
+import urllib.request
 import logging
 from typing import Optional
 
@@ -307,9 +311,29 @@ def apply_settings(model: str, *, chat_handler: str = "None",
                    tools_enabled: bool = None,
                    wiki_path: str = None,
                    max_rounds: int = None,
-                   result_max_chars: int = None):
+                   result_max_chars: int = None,
+                   backend_mode: str = "local",
+                   remote_url: str = None):
     """Explicitly unload and reload with new settings. Used by Setup panel.
-    Also accepts tool config params forwarded from the frontend Apply button."""
+    Also accepts tool config params forwarded from the frontend Apply button.
+
+    backend_mode='remote': 不操作 LLAMA_CPP_STORAGE，仅校验小主机 llama.cpp 可达。"""
+    if backend_mode == "remote":
+        set_backend("remote", remote_url)
+        if not remote_health_ok():
+            raise RuntimeError(
+                "小主机 llama.cpp 不可达: {} (/health 非 200)。请先在小主机启动模型。".format(_REMOTE_BASE))
+        if tools_enabled is not None or wiki_path is not None:
+            set_tools_config(
+                enabled=tools_enabled,
+                wiki_path=wiki_path,
+                max_rounds=max_rounds,
+                result_max_chars=result_max_chars,
+            )
+        _log.info("Remote backend verified at %s", _REMOTE_BASE)
+        return True
+
+    set_backend("local", remote_url)
     storage = _get_storage()
 
     # Save sidebar state before clean
@@ -348,7 +372,12 @@ def apply_settings(model: str, *, chat_handler: str = "None",
     return True
 
 def unload_model():
-    """Unload via LLAMA_CPP_STORAGE."""
+    """Unload via LLAMA_CPP_STORAGE (local) or clear history only (remote)."""
+    if _BACKEND_MODE == "remote":
+        # 远程模型由小主机 llama.cpp 管理（bat 启停），这里只清对话
+        reset_history()
+        _log.info("Remote backend: sidebar history cleared (server model untouched)")
+        return
     storage = _get_storage()
     storage.clean(all=True)
     _log.info("Model unloaded via LLAMA_CPP_STORAGE")
@@ -358,6 +387,217 @@ def reset_history():
     storage = _get_storage()
     storage.clean_state(_SIDEBAR_UID)
     _log.info("Sidebar conversation history cleared")
+
+
+# ============================================================
+# Remote backend (小主机 llama.cpp, OpenAI-compatible HTTP)
+# ============================================================
+
+_BACKEND_MODE = "local"          # "local" = LLAMA_CPP_STORAGE, "remote" = 小主机 llama.cpp
+_REMOTE_BASE = "http://10.0.0.8:60000"
+_REMOTE_SHORT_TIMEOUT = 8
+_REMOTE_LONG_TIMEOUT = 600
+_REMOTE_CACHE = {"ts": 0.0, "data": None}
+
+# Keys llama.cpp server (OpenAI endpoint) accepts for a single completion.
+_REMOTE_OPT_KEYS = ("temperature", "top_p", "top_k", "min_p",
+                    "repeat_penalty", "frequency_penalty", "presence_penalty",
+                    "max_tokens", "seed", "typical_p")
+
+
+def set_backend(mode="local", base_url=None):
+    """Switch inference backend: 'local' (LLAMA_CPP_STORAGE) or 'remote' (小主机 llama.cpp HTTP)."""
+    global _BACKEND_MODE, _REMOTE_BASE
+    if mode in ("local", "remote"):
+        _BACKEND_MODE = mode
+    if base_url:
+        url = str(base_url).strip()
+        if url:
+            _REMOTE_BASE = url.rstrip("/")
+
+
+def get_backend():
+    return {"mode": _BACKEND_MODE, "base_url": _REMOTE_BASE}
+
+
+def _remote_url(path):
+    return _REMOTE_BASE.rstrip("/") + path
+
+
+def remote_health_ok():
+    """True when /health returns 200 (llama-server loads -> 503 until ready)."""
+    try:
+        with urllib.request.urlopen(_remote_url("/health"), timeout=_REMOTE_SHORT_TIMEOUT) as r:
+            r.read()
+        return True
+    except urllib.error.HTTPError as e:
+        return e.code == 200
+    except Exception:
+        return False
+
+
+def _remote_get_json(path, timeout=_REMOTE_SHORT_TIMEOUT):
+    with urllib.request.urlopen(_remote_url(path), timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def remote_info(force=False):
+    """Cached server info: model id / n_ctx / model_path / error."""
+    now = time.time()
+    if not force and _REMOTE_CACHE["data"] and (now - _REMOTE_CACHE["ts"]) < 5:
+        return _REMOTE_CACHE["data"]
+    info = {"ready": False, "model": None, "n_ctx": None, "path": None, "error": None}
+    try:
+        models = _remote_get_json("/v1/models")
+        ids = [m.get("id") for m in (models.get("data") or []) if m.get("id")]
+        if ids:
+            info["ready"] = True
+            info["model"] = ids[0]
+        try:
+            props = _remote_get_json("/props")
+            info["n_ctx"] = (props.get("default_generation_settings") or {}).get("n_ctx")
+            info["path"] = props.get("model_path")
+        except Exception:
+            pass
+    except Exception as e:
+        info["error"] = str(e)
+    _REMOTE_CACHE["ts"] = time.time()
+    _REMOTE_CACHE["data"] = info
+    return info
+
+
+def _remote_opts(opts):
+    """Inference params only (n_ctx / gpu layers etc. are server-side on 小主机)."""
+    return {k: v for k, v in (opts or {}).items()
+            if k in _REMOTE_OPT_KEYS and v is not None}
+
+
+def _remote_complete_text(messages, opts):
+    """Non-streaming chat completion against 小主机 llama.cpp. Returns content str."""
+    info = remote_info()
+    payload = {"model": info.get("model") or "local-model",
+               "messages": messages, "stream": False}
+    payload.update(_remote_opts(opts))
+    req = urllib.request.Request(
+        _remote_url("/v1/chat/completions"), method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=_REMOTE_LONG_TIMEOUT) as r:
+        obj = json.loads(r.read().decode("utf-8", "replace"))
+    msg = ((obj.get("choices") or [{}])[0].get("message") or {})
+    return msg.get("content") or ""
+
+
+def _remote_chat_stream(messages, opts):
+    """Streaming chat completion. Yields {chunk|done|full_response|error}."""
+    info = remote_info()
+    payload = {"model": info.get("model") or "local-model",
+               "messages": messages, "stream": True}
+    payload.update(_remote_opts(opts))
+    req = urllib.request.Request(
+        _remote_url("/v1/chat/completions"), method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Accept": "text/event-stream"})
+    try:
+        with urllib.request.urlopen(req, timeout=_REMOTE_LONG_TIMEOUT) as resp:
+            full = ""
+            while True:
+                line = resp.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").strip()
+                if not text.startswith("data:"):
+                    continue
+                data = text[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except Exception:
+                    continue
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                c = delta.get("content") if isinstance(delta, dict) else None
+                if c:
+                    full += c
+                    yield {"chunk": c, "done": False}
+                if choices[0].get("finish_reason"):
+                    break
+        yield {"chunk": "", "done": True, "full_response": full}
+    except Exception as e:
+        yield {"chunk": "", "done": True, "full_response": "", "error": str(e)}
+
+
+def remote_chat(prompt, system_prompt="", opts=None):
+    """Remote chat with the same sidebar-history semantics as local chat()."""
+    storage = _get_storage()
+    uid = _SIDEBAR_UID
+    messages = []
+    history = storage.messages.get(uid, [])
+    last_sys = storage.sys_prompts.get(uid, None)
+    if last_sys != system_prompt:
+        history = []
+        storage.sys_prompts[uid] = system_prompt
+        if system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt})
+    else:
+        if system_prompt.strip() and not history:
+            messages.append({"role": "system", "content": system_prompt})
+    messages.extend(history)
+    messages.append({"role": "user", "content": prompt})
+
+    full = ""
+    for ev in _remote_chat_stream(messages, opts):
+        if ev.get("error"):
+            yield {"chunk": "", "done": True, "full_response": "",
+                   "error": ev["error"]}
+            return
+        if ev.get("done"):
+            full = ev.get("full_response", "")
+            history.append({"role": "user", "content": prompt})
+            history.append({"role": "assistant", "content": full.strip()})
+            storage.messages[uid] = history
+            _trim_history(history)
+            _update_context_usage(history, storage)
+            yield {"chunk": "", "done": True, "full_response": full.strip()}
+            return
+        c = ev.get("chunk", "")
+        if c:
+            full += c
+            yield {"chunk": c, "done": False}
+
+
+def remote_vision(prompt, images, system_prompt="", options=None):
+    """Vision via remote llama.cpp (model with --mmproj on the server side)."""
+    encoded = []
+    for img in (images if isinstance(images, (list, tuple)) else [images]):
+        if isinstance(img, str) and img.startswith("data:image"):
+            encoded.append(img)
+        elif isinstance(img, str) and os.path.exists(img):
+            encoded.append(_encode_image_to_uri(img))
+    if not encoded:
+        raise ValueError("No valid images provided")
+
+    content_parts = [{"type": "text", "text": prompt}]
+    for uri in encoded:
+        content_parts.append({"type": "image_url", "image_url": {"url": uri}})
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": content_parts})
+
+    result = _remote_complete_text(messages, options)
+
+    storage = _get_storage()
+    storage.messages[_SIDEBAR_UID] = [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": result},
+    ]
+    storage.sys_prompts[_SIDEBAR_UID] = system_prompt
+    return result
 
 
 # ============================================================
@@ -399,6 +639,11 @@ def chat(model: str, prompt: str, *,
     cache_type_v = str(opts.pop("cache_type_v", "default"))
     n_cpu_moe = int(opts.pop("n_cpu_moe", 0))
     n_seq_max = int(opts.pop("n_seq_max", 1))
+
+    if _BACKEND_MODE == "remote":
+        # 远程后端：忽略本地 chat_handler / mmproj（模型由小主机 llama.cpp 服务端决定）
+        yield from remote_chat(prompt, system_prompt=system_prompt, opts=opts)
+        return
 
     llm = _ensure_model(model, chat_handler=chat_handler, mmproj=mmproj,
                         n_ctx=n_ctx_val, vram_limit=vram_limit,
@@ -675,6 +920,10 @@ def vision(model: str, prompt: str, images, *,
            mmproj: str = "None",
            options: Optional[dict] = None):
     """Generate description from image(s). Returns str."""
+    if _BACKEND_MODE == "remote":
+        # 远程后端：handler 无关（小主机 llama.cpp 按启动参数决定是否带 mmproj）
+        return remote_vision(prompt, images, system_prompt=system_prompt, options=options)
+
     if chat_handler == "None":
         raise ValueError("Vision requires a chat_handler. Select one in the sidebar.")
 
@@ -768,19 +1017,23 @@ def generate_prompt(model: str, intent: str, wiki_path: str, *,
     n_cpu_moe = int(opts.pop("n_cpu_moe", 0))
     n_seq_max = int(opts.pop("n_seq_max", 1))
 
-    llm = _ensure_model(model, chat_handler=chat_handler, mmproj=mmproj,
-                        n_ctx=n_ctx_val, vram_limit=vram_limit,
-                        image_min_tokens=image_min, image_max_tokens=image_max,
-                        n_gpu_layers=n_gpu_layers,
-                        cache_type_k=cache_type_k,
-                        cache_type_v=cache_type_v,
-                        n_cpu_moe=n_cpu_moe,
-                        n_seq_max=n_seq_max)
-    llama_opts = _build_options(opts)
+    if _BACKEND_MODE == "remote":
+        def _chat_fn(messages):
+            return _remote_complete_text(messages, opts)
+    else:
+        llm = _ensure_model(model, chat_handler=chat_handler, mmproj=mmproj,
+                            n_ctx=n_ctx_val, vram_limit=vram_limit,
+                            image_min_tokens=image_min, image_max_tokens=image_max,
+                            n_gpu_layers=n_gpu_layers,
+                            cache_type_k=cache_type_k,
+                            cache_type_v=cache_type_v,
+                            n_cpu_moe=n_cpu_moe,
+                            n_seq_max=n_seq_max)
+        llama_opts = _build_options(opts)
 
-    def _chat_fn(messages):
-        resp = llm.create_chat_completion(messages=messages, **llama_opts)
-        return resp["choices"][0]["message"].get("content") or ""
+        def _chat_fn(messages):
+            resp = llm.create_chat_completion(messages=messages, **llama_opts)
+            return resp["choices"][0]["message"].get("content") or ""
 
     result = prompt_generator.generate_prompt(
         intent, wiki_path, _chat_fn,
@@ -789,7 +1042,7 @@ def generate_prompt(model: str, intent: str, wiki_path: str, *,
         output_protocol=prompt_generator.DEFAULT_OUTPUT_PROTOCOL,
         max_rounds=max_rounds,
         fallback=fallback,
-        max_ctx_tokens=n_ctx_val,
+        max_ctx_tokens=(remote_info().get("n_ctx") if _BACKEND_MODE == "remote" else n_ctx_val),
     )
 
     # 保留生成历史：意图 + 结果写入 sidebar 对话（工具中间产物不进历史）
@@ -917,27 +1170,65 @@ def tool_file_read(file_path):
         return f"Path not found: '{file_path}'.\nWiki contents:\n{_json.dumps(tree, ensure_ascii=False, indent=2)}"
 
 def get_status() -> dict:
-    try:
-        storage = _get_storage()
-    except RuntimeError as e:
-        return {"loaded": False, "error": str(e)}
-
-    text_models = scan_text_models()
-    vision_models = scan_vision_models()
-    cfg = storage.current_config
-    return {
-        "loaded": storage.llm is not None,
-        "context_tokens": _LAST_CONTEXT_TOKENS,
-        "context_limit": _LAST_CONTEXT_LIMIT,
-        "loaded_model": cfg.get("model") if cfg else None,
-        "loaded_handler": cfg.get("chat_handler") if cfg else None,
-        "current_config": dict(cfg) if cfg else None,
-        "text_models": text_models,
-        "vision_models": vision_models,
+    backend = get_backend()
+    base = {
+        "text_models": scan_text_models(),
+        "vision_models": scan_vision_models(),
         "mmproj_files": scan_mmproj_files(),
         "chat_handlers": get_chat_handlers(),
         "models_dir": _get_models_dir(),
     }
+
+    if backend["mode"] == "remote":
+        info = remote_info()
+        base["backend"] = backend
+        base["remote_info"] = info
+        base["context_tokens"] = _LAST_CONTEXT_TOKENS
+        base["context_limit"] = info.get("n_ctx") or _LAST_CONTEXT_LIMIT
+        if info.get("ready"):
+            base["loaded"] = True
+            base["loaded_model"] = info.get("model")
+            base["loaded_handler"] = "remote"
+            base["current_config"] = {
+                "model": info.get("model"),
+                "chat_handler": "remote",
+                "mmproj": "remote",
+                "n_ctx": info.get("n_ctx") or 0,
+                "n_gpu_layers": -1,
+                "vram_limit": -1,
+                "cache_type_k": "default",
+                "cache_type_v": "default",
+                "n_cpu_moe": 0,
+                "n_seq_max": 1,
+                "image_min_tokens": 0,
+                "image_max_tokens": 0,
+            }
+        else:
+            base["loaded"] = False
+            base["loaded_model"] = None
+            base["loaded_handler"] = None
+            base["current_config"] = None
+        return base
+
+    try:
+        storage = _get_storage()
+    except RuntimeError as e:
+        base["backend"] = backend
+        base["loaded"] = False
+        base["error"] = str(e)
+        base["context_tokens"] = _LAST_CONTEXT_TOKENS
+        base["context_limit"] = _LAST_CONTEXT_LIMIT
+        return base
+
+    cfg = storage.current_config
+    base["backend"] = backend
+    base["loaded"] = storage.llm is not None
+    base["context_tokens"] = _LAST_CONTEXT_TOKENS
+    base["context_limit"] = _LAST_CONTEXT_LIMIT
+    base["loaded_model"] = cfg.get("model") if cfg else None
+    base["loaded_handler"] = cfg.get("chat_handler") if cfg else None
+    base["current_config"] = dict(cfg) if cfg else None
+    return base
 
 # ---- Register built-in tools ----
 register_tool(
