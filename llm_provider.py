@@ -539,13 +539,12 @@ def remote_chat(prompt, system_prompt="", opts=None):
     history = storage.messages.get(uid, [])
     last_sys = storage.sys_prompts.get(uid, None)
     if last_sys != system_prompt:
+        # system prompt 变化 = 开启新对话（清历史）
         history = []
         storage.sys_prompts[uid] = system_prompt
-        if system_prompt.strip():
-            messages.append({"role": "system", "content": system_prompt})
-    else:
-        if system_prompt.strip() and not history:
-            messages.append({"role": "system", "content": system_prompt})
+    # llama.cpp 服务无状态且 history 不含 system 角色：每轮都必须带上 system prompt
+    if system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt})
     messages.extend(history)
     messages.append({"role": "user", "content": prompt})
 
@@ -658,13 +657,12 @@ def chat(model: str, prompt: str, *,
     # Check if system prompt changed
     last_sys = storage.sys_prompts.get(uid, None)
     if last_sys != system_prompt:
+        # system prompt 变化 = 开启新对话（清历史）
         history = []
         storage.sys_prompts[uid] = system_prompt
-        if system_prompt.strip():
-            messages.append({"role": "system", "content": system_prompt})
-    else:
-        if system_prompt.strip() and not history:
-            messages.append({"role": "system", "content": system_prompt})
+    # llama.cpp 服务无状态且 history 不含 system 角色：每轮都必须带上 system prompt
+    if system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt})
     messages.extend(history)
     messages.append({"role": "user", "content": prompt})
 
