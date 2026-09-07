@@ -1146,9 +1146,6 @@ function onRightClickVision(images, filename) {
 
 async function visionDescribe(images, prompt) {
     try {
-        chatHistory.push({ role: "system", content: " Analyzing image..." });
-        updateChatUI();
-
         const resp = await fetch("/llm-sidebar/vision", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1160,28 +1157,20 @@ async function visionDescribe(images, prompt) {
                 prompt: prompt,
                 chat_handler: selectedHandler,
                 mmproj_file: selectedMmproj || "None",
-                system_prompt: systemPromptEnabled ? systemPrompt : "",
+                system_prompt: systemPromptEnabled ? systemPrompt : '',
                 options: buildOptions(),
             }),
         });
         const data = await resp.json();
 
         if (data?.success) {
-            const desc = data.data.response;
-            chatHistory.pop();
-            chatHistory.push({ role: "assistant", content: desc });
+            // 反推是无状态工具：结果进 Desc 文本框（appendToDescribe 自动切到 Desc 标签），不写 Chat 池
+            appendToDescribe(data.data.response);
         } else {
-            chatHistory.pop();
-            chatHistory.push({ role: "system", content: `Error: ${data?.error || "Vision failed"}` });
+            alert(`描述失败：${data?.error || "Vision failed"}`);
         }
-        updateChatUI();
-        saveState();
-        switchTab("chat");
     } catch (e) {
-        chatHistory.pop();
-        chatHistory.push({ role: "system", content: `Error: ${e.message}` });
-        updateChatUI();
-        saveState();
+        alert(`描述失败：${e.message}`);
     }
 }
 

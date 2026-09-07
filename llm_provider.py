@@ -399,12 +399,6 @@ _REMOTE_SHORT_TIMEOUT = 8
 _REMOTE_LONG_TIMEOUT = 600
 _REMOTE_CACHE = {"ts": 0.0, "data": None}
 
-# 局域网直连小主机: 必须绕过 HTTP(S)_PROXY 环境变量。
-# ComfyUI 启动 bat (run_nvidia_gpu*.bat) set 了 HTTP_PROXY/HTTPS_PROXY,
-# urllib 默认会把 10.0.0.8 的请求也丢进代理 (127.0.0.1:1789x),
-# 代理未开时 remote_health_ok() 永远失败 -> "小主机 llama.cpp 不可达"。
-_REMOTE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
 # Keys llama.cpp server (OpenAI endpoint) accepts for a single completion.
 _REMOTE_OPT_KEYS = ("temperature", "top_p", "top_k", "min_p",
                     "repeat_penalty", "frequency_penalty", "presence_penalty",
@@ -433,7 +427,7 @@ def _remote_url(path):
 def remote_health_ok():
     """True when /health returns 200 (llama-server loads -> 503 until ready)."""
     try:
-        with _REMOTE_OPENER.open(_remote_url("/health"), timeout=_REMOTE_SHORT_TIMEOUT) as r:
+        with urllib.request.urlopen(_remote_url("/health"), timeout=_REMOTE_SHORT_TIMEOUT) as r:
             r.read()
         return True
     except urllib.error.HTTPError as e:
@@ -443,7 +437,7 @@ def remote_health_ok():
 
 
 def _remote_get_json(path, timeout=_REMOTE_SHORT_TIMEOUT):
-    with _REMOTE_OPENER.open(_remote_url(path), timeout=timeout) as r:
+    with urllib.request.urlopen(_remote_url(path), timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
@@ -488,7 +482,7 @@ def _remote_complete_text(messages, opts):
         _remote_url("/v1/chat/completions"), method="POST",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"})
-    with _REMOTE_OPENER.open(req, timeout=_REMOTE_LONG_TIMEOUT) as r:
+    with urllib.request.urlopen(req, timeout=_REMOTE_LONG_TIMEOUT) as r:
         obj = json.loads(r.read().decode("utf-8", "replace"))
     msg = ((obj.get("choices") or [{}])[0].get("message") or {})
     return msg.get("content") or ""
@@ -506,7 +500,7 @@ def _remote_chat_stream(messages, opts):
         headers={"Content-Type": "application/json",
                  "Accept": "text/event-stream"})
     try:
-        with _REMOTE_OPENER.open(req, timeout=_REMOTE_LONG_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=_REMOTE_LONG_TIMEOUT) as resp:
             full = ""
             while True:
                 line = resp.readline()
@@ -597,12 +591,6 @@ def remote_vision(prompt, images, system_prompt="", options=None):
 
     result = _remote_complete_text(messages, options)
 
-    storage = _get_storage()
-    storage.messages[_SIDEBAR_UID] = [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": result},
-    ]
-    storage.sys_prompts[_SIDEBAR_UID] = system_prompt
     return result
 
 
@@ -978,15 +966,6 @@ def vision(model: str, prompt: str, images, *,
     resp = llm.create_chat_completion(messages=messages, **llama_opts)
     result = resp["choices"][0]["message"]["content"].strip()
 
-    # Save vision response to sidebar history so chat messages can
-    # reference it (e.g. "expand on this description").
-    storage = _get_storage()
-    storage.messages[_SIDEBAR_UID] = [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": result},
-    ]
-    storage.sys_prompts[_SIDEBAR_UID] = system_prompt
-
     return result
 
 
@@ -1009,7 +988,8 @@ def generate_prompt(model: str, intent: str, wiki_path: str, *,
     """用 wiki 生成绘画提示词：程序路由 → LLM 一次组装 → 降级兜底。
 
     与 chat() 不同，本函数不走工具循环（程序直接读候选文件），
-    是"一次调用"路径。结果写入 sidebar 历史（保留生成历史）。
+    是"一次调用"路径。生成任务无状态：不读写 Chat 池历史，
+    结果只留在 Gen 标签自身结果区（由前端 renderGenResult 展示）。
     返回 dict（含 prompt / mode / route 等），由路由层转 JSON。
     """
     opts = dict(options or {})
@@ -1050,16 +1030,6 @@ def generate_prompt(model: str, intent: str, wiki_path: str, *,
         fallback=fallback,
         max_ctx_tokens=(remote_info().get("n_ctx") if _BACKEND_MODE == "remote" else n_ctx_val),
     )
-
-    # 保留生成历史：意图 + 结果写入 sidebar 对话（工具中间产物不进历史）
-    if result.get("ok"):
-        storage = _get_storage()
-        history = storage.messages.get(_SIDEBAR_UID, [])
-        history.append({"role": "user", "content": f"[生成提示词] {intent}"})
-        history.append({"role": "assistant", "content": result.get("prompt", "")})
-        storage.messages[_SIDEBAR_UID] = history
-        _trim_history(history)
-        _update_context_usage(history, storage)
 
     # 生成任务无状态：清 KV cache，防止连续生成时状态残留污染下一次
     try:
