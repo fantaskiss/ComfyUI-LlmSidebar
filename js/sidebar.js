@@ -20,8 +20,21 @@ let selectedMmproj = "";  // "None" = no mmproj, "" = auto
 let selectedHandler = "None";
 let chatHistory = [];
 let describeText = "";
-let systemPrompt = "";
 let systemPromptEnabled = true;
+// 预设槽 v3.0：chatPRESET = Chat 系统提示词 3 套；descPRESET = 右键反推指令 3 套
+// 每槽 {name, text}；激活槽 = 实际生效的预设；name 空时显示 "预设 N"
+let chatPresets = [
+    { name: "", text: "" },
+    { name: "", text: "" },
+    { name: "", text: "" },
+];
+let chatPresetIdx = 0;
+let descPresets = [
+    { name: "", text: "" },
+    { name: "", text: "" },
+    { name: "", text: "" },
+];
+let descPresetIdx = 0;
 // Inference params (SysPrompt tab)
 let maxTokens = 300;
 let temperature = "";
@@ -82,8 +95,30 @@ function loadState() {
             selectedHandler = s.selectedHandler || "None";
             chatHistory = s.chatHistory || [];
             describeText = s.describeText || "";
-            systemPrompt = s.systemPrompt || "";
             systemPromptEnabled = s.systemPromptEnabled !== false;
+            // 预设槽：v3.0 结构；旧版单条 systemPrompt 迁移到 chatPresets[0]
+            if (Array.isArray(s.chatPresets) && s.chatPresets.length === 3) {
+                chatPresets = s.chatPresets.map(p => ({ name: (p && p.name) || "", text: (p && p.text) || "" }));
+                chatPresetIdx = (s.chatPresetIdx >= 0 && s.chatPresetIdx < 3) ? s.chatPresetIdx : 0;
+            } else {
+                chatPresets = [
+                    { name: "", text: s.systemPrompt || "" },
+                    { name: "", text: "" },
+                    { name: "", text: "" },
+                ];
+                chatPresetIdx = 0;
+            }
+            if (Array.isArray(s.descPresets) && s.descPresets.length === 3) {
+                descPresets = s.descPresets.map(p => ({ name: (p && p.name) || "", text: (p && p.text) || "" }));
+                descPresetIdx = (s.descPresetIdx >= 0 && s.descPresetIdx < 3) ? s.descPresetIdx : 0;
+            } else {
+                descPresets = [
+                    { name: "", text: DESCRIBE_PROMPT },
+                    { name: "", text: "" },
+                    { name: "", text: "" },
+                ];
+                descPresetIdx = 0;
+            }
             maxTokens = s.maxTokens || 300;
             temperature = s.temperature || "";
             topP = s.topP || "";
@@ -119,8 +154,11 @@ function saveState() {
             selectedHandler,
             chatHistory: chatHistory.slice(-100),
             describeText,
-            systemPrompt,
             systemPromptEnabled,
+            chatPresets,
+            chatPresetIdx,
+            descPresets,
+            descPresetIdx,
             maxTokens,
             temperature, topP, topK, repeatPenalty,
             nCtx, nGpuLayers, vramLimit,
@@ -165,7 +203,7 @@ function createPanel() {
     <div id="llm-tabs" style="display:flex;border-bottom:1px solid var(--border-color,#333);flex-shrink:0">
       <button id="llm-tab-chat" class="llm-tab active" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">💬 Chat</button>
       <button id="llm-tab-desc" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">📝 Desc</button>
-      <button id="llm-tab-sys" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">⚙️ Sys</button>
+      <button id="llm-tab-sys" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">⚙️ Prompt</button>
       <button id="llm-tab-gen" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">🎨 Gen</button>
       <button id="llm-tab-setup" class="llm-tab" style="flex:1;padding:10px 6px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:13px">🔧 Setup</button>
       <button id="llm-close" style="padding:10px 14px;border:none;background:transparent;color:inherit;cursor:pointer;font-size:16px">✕</button>
@@ -176,7 +214,6 @@ function createPanel() {
       <div style="display:flex;align-items:center;padding:8px;gap:6px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0;flex-wrap:wrap">
         <span id="llm-current-model" style="flex:1;min-width:0;font-size:12px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="当前载入模型。选择/加载在 Setup 标签">未加载</span>
         <button id="llm-unload" style="padding:4px 8px;background:#633;color:#faa;border:1px solid #844;border-radius:4px;cursor:pointer;font-size:11px">Unload</button>
-        <button id="llm-clear-chat" style="padding:4px 8px;background:#333;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:11px">Clear</button>
       </div>
       <div id="llm-messages" style="flex:1;overflow-y:auto;padding:8px;min-height:0"></div>
       <div id="llm-ctx-bar" style="padding:2px 10px;font-size:10px;color:#666;text-align:right;flex-shrink:0;border-top:1px solid var(--border-color,#333)">ctx: --/--</div>
@@ -196,23 +233,39 @@ function createPanel() {
       </div>
     </div>
 
-    <!-- System Prompt tab -->
-    <div id="llm-sys-panel" style="display:none;flex-direction:column;flex:1;min-height:0">
-      <div style="display:flex;align-items:center;padding:6px 10px;gap:8px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0">
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
-          <input type="checkbox" id="llm-sys-enabled" checked style="accent-color:var(--primary,#4a6)">
-          <span style="color:var(--fg-color,#ddd)">✅ Enable</span>
-        </label>
-        <span style="flex:1"></span>
-        <button id="llm-sys-reset" style="padding:2px 8px;background:#333;color:#ccc;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:11px">Reset</button>
+    <!-- Prompt tab (v3.0: chatPRESET + descPRESET preset manager) -->
+    <div id="llm-sys-panel" style="display:none;flex-direction:column;flex:1;min-height:0;overflow-y:auto">
+      <div style="display:flex;flex-direction:column;flex:1;min-height:0">
+        <div style="display:flex;align-items:center;padding:6px 10px;gap:8px;border-bottom:1px solid var(--border-color,#333);flex-wrap:wrap;flex-shrink:0">
+          <span style="font-size:12px;font-weight:bold;color:var(--fg-color,#ddd)">💬 Chat 指令</span>
+          <span style="font-size:10px;color:#888">chatPRESET · 激活槽随每条消息发送</span>
+          <span style="flex:1"></span>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+            <input type="checkbox" id="llm-sys-enabled" style="accent-color:var(--primary,#4a6)">
+            <span style="color:var(--fg-color,#ddd)">✅ Enable</span>
+          </label>
+        </div>
+        <div id="llm-chat-preset-tabs" style="display:flex;gap:4px;padding:5px 10px 0;flex-shrink:0"></div>
+        <div style="padding:4px 10px 0;flex-shrink:0">
+          <input id="llm-chat-preset-name" type="text" placeholder="槽位名字（如：翻译助手），留空显示 预设 N" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 6px;font-size:11px;border-radius:3px">
+        </div>
+        <div style="padding:4px 10px 6px;flex:1;min-height:0;display:flex">
+          <textarea id="llm-chat-preset-textarea" placeholder="System prompt：新对话开场指令。例如 You are a helpful creative assistant specialized in image prompt engineering." style="flex:1;width:100%;box-sizing:border-box;min-height:40px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:6px;resize:none;font-size:12px;font-family:inherit;border-radius:3px"></textarea>
+        </div>
       </div>
-      <textarea id="llm-sys-textarea" placeholder="System prompt (sent at start of each conversation)&#10;Example: You are a helpful creative assistant specialized in image prompt engineering." style="flex:1;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:none;padding:10px;resize:none;font-size:12px;font-family:inherit;min-height:0"></textarea>
-      <div id="llm-sys-params" style="padding:6px 10px;border-top:1px solid var(--border-color,#333);flex-shrink:0;display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:11px">
-        <div><label style="color:#888">max_tokens</label><input id="llm-param-tokens" type="number" min="1" max="4096" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px"></div>
-        <div><label style="color:#888">temperature</label><input id="llm-param-temp" type="number" step="0.01" min="0" max="2" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
-        <div><label style="color:#888">top_p</label><input id="llm-param-topp" type="number" step="0.01" min="0" max="1" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
-        <div><label style="color:#888">top_k</label><input id="llm-param-topk" type="number" min="0" max="200" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
-        <div><label style="color:#888">repeat_penalty</label><input id="llm-param-repp" type="number" step="0.01" min="1" max="2" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
+      <div style="display:flex;flex-direction:column;flex:1;min-height:0;border-top:1px solid var(--border-color,#333)">
+        <div style="display:flex;align-items:center;padding:6px 10px;gap:8px;border-bottom:1px solid var(--border-color,#333);flex-shrink:0">
+          <span style="font-size:12px;font-weight:bold;color:var(--fg-color,#ddd)">🖼️ 反推指令</span>
+          <span style="font-size:10px;color:#888">descPRESET · 右键 Describe with LLM 使用激活槽</span>
+          <span style="flex:1"></span>
+        </div>
+        <div id="llm-desc-preset-tabs" style="display:flex;gap:4px;padding:5px 10px 0;flex-shrink:0"></div>
+        <div style="padding:4px 10px 0;flex-shrink:0">
+          <input id="llm-desc-preset-name" type="text" placeholder="槽位名字（如：英文生图），留空显示 预设 N" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 6px;font-size:11px;border-radius:3px">
+        </div>
+        <div style="padding:4px 10px 8px;flex:1;min-height:0;display:flex">
+          <textarea id="llm-desc-preset-textarea" placeholder="反推指令：右键图片时发给模型的指令。槽1内置英文生图向描述（含【中文对照】）" style="flex:1;width:100%;box-sizing:border-box;min-height:40px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:6px;resize:none;font-size:12px;font-family:inherit;border-radius:3px"></textarea>
+        </div>
       </div>
     </div>
 
@@ -282,6 +335,16 @@ function createPanel() {
         <button id="llm-setup-apply" style="flex:1;padding:8px;background:var(--primary,#4a6);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold">Apply &amp; Reload</button>
         <button id="llm-setup-unload" style="padding:8px 14px;background:#633;color:#faa;border:1px solid #844;border-radius:4px;cursor:pointer;font-size:13px">Unload</button>
       </div>
+      <div style="padding:6px 10px;border-top:1px solid var(--border-color,#333);flex-shrink:0">
+        <div style="font-size:11px;font-weight:bold;color:#4a6;margin-bottom:4px">⚡ 推理参数（即时生效，无需 Apply · Chat / Gen / 反推共用）</div>
+        <div id="llm-setup-inf-params" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:11px">
+          <div><label style="color:#888">max_tokens</label><input id="llm-param-tokens" type="number" min="1" max="4096" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px"></div>
+          <div><label style="color:#888">temperature</label><input id="llm-param-temp" type="number" step="0.01" min="0" max="2" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
+          <div><label style="color:#888">top_p</label><input id="llm-param-topp" type="number" step="0.01" min="0" max="1" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
+          <div><label style="color:#888">top_k</label><input id="llm-param-topk" type="number" min="0" max="200" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
+          <div><label style="color:#888">repeat_penalty</label><input id="llm-param-repp" type="number" step="0.01" min="1" max="2" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Gen tab (提示词生成系统：阶段0程序路由 + 阶段1 LLM组装) -->
@@ -336,7 +399,6 @@ function bindEvents() {
         }
     };
     panel.querySelector("#llm-unload").onclick = unloadModel;
-    panel.querySelector("#llm-clear-chat").onclick = clearChat;
     panel.querySelector("#llm-new").onclick = newChat;
 
     // Setup model selector (全局唯一加载入口)
@@ -400,26 +462,53 @@ function bindEvents() {
         saveState();
     };
 
-    // System Prompt
+    // ---- Prompt tab: preset groups (chatPRESET + descPRESET) ----
     const sysEnabled = panel.querySelector("#llm-sys-enabled");
     sysEnabled.checked = systemPromptEnabled;
     sysEnabled.onchange = () => {
         systemPromptEnabled = sysEnabled.checked;
         saveState();
     };
-    const sysTa = panel.querySelector("#llm-sys-textarea");
-    sysTa.value = systemPrompt;
-    sysTa.oninput = () => {
-        systemPrompt = sysTa.value;
-        saveState();
-    };
-    panel.querySelector("#llm-sys-reset").onclick = () => {
-        systemPrompt = "";
-        sysTa.value = "";
-        saveState();
-    };
 
-    // Inference params (SysPrompt tab)
+    function bindPresetGroup(group) {
+        const isChat = group === "chat";
+        const wrap = panel.querySelector(isChat ? "#llm-chat-preset-tabs" : "#llm-desc-preset-tabs");
+        const nameEl = panel.querySelector(isChat ? "#llm-chat-preset-name" : "#llm-desc-preset-name");
+        const ta = panel.querySelector(isChat ? "#llm-chat-preset-textarea" : "#llm-desc-preset-textarea");
+        const presets = isChat ? chatPresets : descPresets;
+        const getIdx = () => (isChat ? chatPresetIdx : descPresetIdx);
+        const setIdx = (i) => { if (isChat) chatPresetIdx = i; else descPresetIdx = i; };
+
+        const buttons = [];
+        for (let i = 0; i < 3; i++) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.style.cssText = "flex:1;padding:3px 0;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:11px;background:#333;color:#ddd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+            b.onclick = () => { setIdx(i); refresh(); saveState(); };
+            wrap.appendChild(b);
+            buttons.push(b);
+        }
+        function refresh() {
+            const idx = getIdx();
+            buttons.forEach((b, bi) => {
+                const nm = (presets[bi] && presets[bi].name) || "预设 " + (bi + 1);
+                b.textContent = nm;
+                b.title = nm;
+                b.style.background = bi === idx ? "var(--primary,#4a6)" : "#333";
+                b.style.color = bi === idx ? "#fff" : "#ddd";
+            });
+            const cur = presets[idx] || { name: "", text: "" };
+            ta.value = cur.text;
+            nameEl.value = cur.name;
+        }
+        ta.oninput = () => { const cur = presets[getIdx()]; if (cur) { cur.text = ta.value; saveState(); } };
+        nameEl.oninput = () => { const cur = presets[getIdx()]; if (cur) { cur.name = nameEl.value; refresh(); saveState(); } };
+        refresh();
+    }
+    bindPresetGroup("chat");
+    bindPresetGroup("desc");
+
+    // Inference params (shared; input elements now live in Setup tab below Apply & Reload)
     const paramInputs = {
         "llm-param-tokens": { get: () => maxTokens, set: (v) => { maxTokens = parseInt(v) || 300; } },
         "llm-param-temp": { get: () => temperature, set: (v) => { temperature = v; } },
@@ -910,7 +999,7 @@ async function generatePrompt() {
                 model: selectedModel,
                 intent: genIntent,
                 wiki_path: wikiPath,
-                system_prompt: systemPromptEnabled ? systemPrompt : "",
+                system_prompt: "", // Gen 独立：不走 chat 预设，协议由 prompt_generator/DEFAULT_OUTPUT_PROTOCOL 控制
                 chat_handler: selectedHandler,
                 mmproj_file: selectedMmproj || "None",
                 options: buildOptions(),
@@ -977,7 +1066,7 @@ async function sendMessage() {
                 remote_url: backendMode === "remote" ? remoteBaseUrl : "",
                 model: selectedModel,
                 prompt: text,
-                system_prompt: systemPromptEnabled ? systemPrompt : "",
+                system_prompt: systemPromptEnabled ? chatPresets[chatPresetIdx].text : "",
                 chat_handler: selectedHandler,
                 mmproj_file: selectedMmproj || "None",
                 options: buildOptions(),
@@ -1047,13 +1136,6 @@ async function unloadModel() {
     } catch (e) {
         console.error("LlmSidebar: unload failed", e);
     }
-}
-
-function clearChat() {
-    chatHistory = [];
-    updateChatUI();
-    saveState();
-    updateContextDisplay();
 }
 
 async function newChat() {
@@ -1138,9 +1220,13 @@ function onRightClickVision(images, filename) {
         alert("请先在 Setup 填写小主机 llama.cpp 的 URL");
         return;
     }
+    // 反推指令 = 激活的 desc 预设；槽空/越界回退内置 DESCRIBE_PROMPT 保底
+    const activeDesc = (descPresetIdx >= 0 && descPresetIdx < descPresets.length)
+        ? descPresets[descPresetIdx] : null;
+    const descBase = (activeDesc && activeDesc.text) ? activeDesc.text : DESCRIBE_PROMPT;
     const prompt = filename
-        ? `${DESCRIBE_PROMPT}\n\nFilename: ${filename}`
-        : DESCRIBE_PROMPT;
+        ? `${descBase}\n\nFilename: ${filename}`
+        : descBase;
     visionDescribe(images, prompt);
 }
 
@@ -1157,7 +1243,7 @@ async function visionDescribe(images, prompt) {
                 prompt: prompt,
                 chat_handler: selectedHandler,
                 mmproj_file: selectedMmproj || "None",
-                system_prompt: systemPromptEnabled ? systemPrompt : '',
+                system_prompt: '', // 反推只吃 desc 预设；Sys/chat 提示词不叠加（v3.0）
                 options: buildOptions(),
             }),
         });
