@@ -33,11 +33,21 @@ CONSTRAINT_FILENAME = "constraint_domains.json"  # 六轴约束域（可共享�
 # 用途：保留在 wiki 目录但不想被 LLM 路由命中的文件（如用户私人实验笔记）。
 # 按文件名匹配（含 .md），可加多个。
 EXCLUDE_FILES = {
-    "04-mode-selection.md",   # 2026-08-07 用户决定：模式选择由用户自己定，本地模型判断不可靠
+    "04-mode-decision.md",    # 2026-08-07 用户决定（原 04-mode-selection.md，文件已改名）：模式选择由用户自己定，本地模型判断不可靠
 }
 
 DEFAULT_MAX_CANDIDATES = 6                # 候选文件上限
 DEFAULT_SCORE_FLOOR = 1                   # 低于此分不入选
+
+# 分区护栏（boards，分区表定义在 conflicts.json）-----------------------------
+# 目的：把“工作流模板”（C 区：50-57 这类完整制片流程）与“组装规则 / 写手参考”
+# （A / B 区）分开，既防风格模板混进纯提示词组装请求，也防纯组装候选稀释工作流请求。
+# 规则：命中下列词 = 工作流意图 → 候选只从 C 区取；否则剔除 C 区；过滤后为空则回退全量。
+# 2026-09-11 加（用户拍板）；分区只影响候选，不影响 always_include。
+WORKFLOW_KEYWORDS = (
+    "工作流", "做一条", "做条", "完整片子", "整片", "成片", "出片", "片头",
+    "开场动画", "mv", "短片", "广告", "宣传片", "定格", "拼贴", "科普", "手绘",
+)
 
 # 停用词（关键词提取时过滤）
 # 包含：请求性/任务性词语（用户说话方式，非画面内容）——防止"提示词"命中"负面提示词"模块
@@ -83,11 +93,11 @@ def _save_json(path: str, data: Any) -> bool:
 # ============================================================
 
 def build_index(wiki_path: str, force: bool = False) -> Optional[dict]:
-    """扫描 wiki 目录，为每个 .md 文件生成条目，写入 index.json。
+    """扫描 wiki 目录，为每个 .md / .txt 文件生成条目，写入 index.json。
 
     条目字段：
       path      — 相对路径（正斜杠）
-      name      — 文件名（去 .md）
+      name      — 文件名（去扩展名）
       title     — 第一个 # 标题（无则用文件名）
       tags      — 文件名分词 + frontmatter tags + 标题分词
       summary   — 正文前若干字符（用于匹配和 LLM 摘要）
@@ -102,11 +112,12 @@ def build_index(wiki_path: str, force: bool = False) -> Optional[dict]:
         return _load_json(out_path)
 
     entries = []
+    boards = ((_load_json(os.path.join(wiki, CONFLICT_FILENAME), {}) or {}).get("boards") or {})
     for root, dirs, files in os.walk(wiki):
         # 跳过 .obsidian
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fn in sorted(files):
-            if not fn.endswith(".md"):
+            if not fn.endswith((".md", ".txt")):   # .txt 收录（62-tags for emotions.txt）；2026-09-11 加
                 continue
             if fn in EXCLUDE_FILES:
                 continue  # 排除名单：不索引、不路由
@@ -140,7 +151,7 @@ def build_index(wiki_path: str, force: bool = False) -> Optional[dict]:
             links = re.findall(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", body)
 
             # 文件名分词（kebab/下划线/数字前缀）
-            stem = fn[:-3]
+            stem = os.path.splitext(fn)[0]   # 2026-09-11: 兼容 .txt/.md，不再硬切末尾 3 字符
             name_parts = re.split(r"[\-_]+", stem)
             name_parts = [p for p in name_parts if p]
 
@@ -155,6 +166,7 @@ def build_index(wiki_path: str, force: bool = False) -> Optional[dict]:
                 "summary": summary,
                 "links": links,
                 "size": len(text),
+                "board": _board_of(rel, boards),   # 分区（conflicts.json boards），空串=未分类
             })
 
     index = {
@@ -215,6 +227,37 @@ def extract_keywords(intent: str) -> list[str]:
 # ============================================================
 # 打分匹配
 # ============================================================
+
+def _board_of(rel: str, boards: dict) -> str:
+    """按 conflicts.json 的 boards 前缀表判断条目分区（A / B / C）。"""
+    base = os.path.basename(rel)
+    for board, prefixes in (boards or {}).items():
+        if not isinstance(prefixes, list):
+            continue
+        for p in prefixes:
+            if base.startswith(str(p)):
+                return board
+    return ""
+
+
+def is_workflow_intent(intent: str) -> bool:
+    """意图是否指向“做一条完整片子 / 某类风格模板”（boards 分区护栏用）。"""
+    t = (intent or "").lower()
+    return any(k.lower() in t for k in WORKFLOW_KEYWORDS)
+
+
+def scope_index(index: dict, boards: dict, want_c: bool) -> dict:
+    """按分区裁剪 index：want_c=True 只留 C 区，False 剔除 C 区。
+
+    没有标注分区的条目一律保留（未分类文件不会因为护栏消失）。
+    """
+    out = dict(index)
+    out["entries"] = [
+        e for e in index.get("entries", [])
+        if not e.get("board") or (e.get("board") == "C") == want_c
+    ]
+    return out
+
 
 def _entry_text(entry: dict) -> str:
     """拼接条目的可匹配文本（小写）。"""
@@ -357,11 +400,25 @@ def route(intent: str, wiki_path: str,
     keywords = extract_keywords(intent)
     candidates = match_files(index, keywords, max_candidates=max_candidates)
 
+    # 分区护栏：工作流意图 → 只从 C 区取；否则剔除 C 区（过滤后为空则回退全量）
+    boards = conflicts.get("boards") or {}
+    board_mode = "off"
+    if boards:
+        want_c = is_workflow_intent(intent)
+        scoped = match_files(scope_index(index, boards, want_c), keywords,
+                             max_candidates=max_candidates)
+        if scoped:
+            candidates = scoped
+            board_mode = "workflow(C)" if want_c else "assembly(AB)"
+        else:
+            board_mode = "all(fallback)"
+
     result = {
         "ok": True,
         "wiki": index.get("wiki", os.path.basename(wiki)),
         "intent": intent,
         "keywords": keywords,
+        "board_mode": board_mode,
         "always_include": collect_always_include(conflicts),
         "candidates": [
             {
