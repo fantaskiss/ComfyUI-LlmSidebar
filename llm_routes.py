@@ -75,6 +75,7 @@ def register_routes(prompt_server, llm_module):
             prompt = data.get("prompt", "")
             backend_mode = data.get("backend_mode", "local") or "local"
             _llm.set_backend(backend_mode, data.get("remote_url"))
+            _llm.set_thinking(data.get("thinking_enabled", True))
             if backend_mode != "remote" and not model:
                 return web.json_response(
                     {"success": False, "error": "model required (local backend)"}, status=400)
@@ -137,6 +138,7 @@ def register_routes(prompt_server, llm_module):
             wiki_path = data.get("wiki_path", "")
             backend_mode = data.get("backend_mode", "local") or "local"
             _llm.set_backend(backend_mode, data.get("remote_url"))
+            _llm.set_thinking(data.get("thinking_enabled", True))
             if backend_mode != "remote" and not model:
                 return web.json_response(
                     {"success": False,
@@ -179,6 +181,7 @@ def register_routes(prompt_server, llm_module):
             mmproj = data.get("mmproj_file", "None")
             backend_mode = data.get("backend_mode", "local") or "local"
             _llm.set_backend(backend_mode, data.get("remote_url"))
+            _llm.set_thinking(data.get("thinking_enabled", True))
 
             if not images:
                 return web.json_response(

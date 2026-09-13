@@ -41,6 +41,9 @@ let temperature = "";
 let topP = "";
 let topK = "";
 let repeatPenalty = "";
+
+// 思考开关（仅小主机远程模式）: true = Default(不干预服务端默认), false = Off(强制不思考)
+let thinkingEnabled = true;
 // Load params (Setup tab)
 let nCtx = 8192;
 let nGpuLayers = -1;
@@ -140,6 +143,7 @@ function loadState() {
             wikiPath = s.wikiPath || "";
             maxToolRounds = s.maxToolRounds || 10;
             toolResultMaxChars = s.toolResultMaxChars || 8000;
+            thinkingEnabled = s.thinkingEnabled !== false;
             genIntent = s.genIntent || "";
             genWikiPath = s.genWikiPath || s.wikiPath || "";
         }
@@ -167,6 +171,7 @@ function saveState() {
             imageMinTokens, imageMaxTokens,
             backendMode, remoteBaseUrl,
             toolsEnabled, wikiPath, maxToolRounds, toolResultMaxChars,
+            thinkingEnabled,
             genIntent, genWikiPath,
         }));
     } catch (e) {}
@@ -343,6 +348,7 @@ function createPanel() {
           <div><label style="color:#888">top_p</label><input id="llm-param-topp" type="number" step="0.01" min="0" max="1" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
           <div><label style="color:#888">top_k</label><input id="llm-param-topk" type="number" min="0" max="200" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
           <div><label style="color:#888">repeat_penalty</label><input id="llm-param-repp" type="number" step="0.01" min="1" max="2" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px" placeholder="model default"></div>
+          <div><label style="color:#888" title="仅小主机远程模式生效">思考(小主机)</label><select id="llm-param-thinking" style="width:100%;box-sizing:border-box;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:2px 4px;font-size:11px;border-radius:3px"><option value="1">Default（服务端默认）</option><option value="0">Off（不思考）</option></select></div>
         </div>
       </div>
     </div>
@@ -515,6 +521,7 @@ function bindEvents() {
         "llm-param-topp": { get: () => topP, set: (v) => { topP = v; } },
         "llm-param-topk": { get: () => topK, set: (v) => { topK = v; } },
         "llm-param-repp": { get: () => repeatPenalty, set: (v) => { repeatPenalty = v; } },
+        "llm-param-thinking": { get: () => (thinkingEnabled ? "1" : "0"), set: (v) => { thinkingEnabled = v === "1"; } },
     };
     for (const [id, p] of Object.entries(paramInputs)) {
         const el = panel.querySelector("#" + id);
@@ -1003,6 +1010,7 @@ async function generatePrompt() {
                 chat_handler: selectedHandler,
                 mmproj_file: selectedMmproj || "None",
                 options: buildOptions(),
+                thinking_enabled: thinkingEnabled,
                 fallback: true,
             }),
         });
@@ -1070,6 +1078,7 @@ async function sendMessage() {
                 chat_handler: selectedHandler,
                 mmproj_file: selectedMmproj || "None",
                 options: buildOptions(),
+                thinking_enabled: thinkingEnabled,
                 tools_enabled: toolsEnabled,
                 wiki_path: wikiPath,
                 max_tool_rounds: maxToolRounds,
@@ -1245,6 +1254,7 @@ async function visionDescribe(images, prompt) {
                 mmproj_file: selectedMmproj || "None",
                 system_prompt: '', // 反推只吃 desc 预设；Sys/chat 提示词不叠加（v3.0）
                 options: buildOptions(),
+                thinking_enabled: thinkingEnabled,
             }),
         });
         const data = await resp.json();

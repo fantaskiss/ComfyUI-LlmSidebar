@@ -420,6 +420,22 @@ def get_backend():
     return {"mode": _BACKEND_MODE, "base_url": _REMOTE_BASE}
 
 
+# 思考开关（仅远程模式打包进 chat_template_kwargs）
+# True  = Default: 不发送该字段, 服务端/模板默认说了算 (如 --reasoning on --reasoning-effort xhigh)
+# False = Off: 显式 enable_thinking=False
+_THINKING_ENABLED = True
+
+
+def set_thinking(enabled=True):
+    """Remote backend: let the model think or not (chat_template_kwargs.enable_thinking)."""
+    global _THINKING_ENABLED
+    _THINKING_ENABLED = bool(enabled)
+
+
+def get_thinking():
+    return _THINKING_ENABLED
+
+
 def _remote_url(path):
     return _REMOTE_BASE.rstrip("/") + path
 
@@ -472,12 +488,22 @@ def _remote_opts(opts):
             if k in _REMOTE_OPT_KEYS and v is not None}
 
 
+def _remote_template_kwargs():
+    """Chat-template kwargs for the remote request."""
+    # Default 时返回空 dict, 完全不发送 chat_template_kwargs:
+    # 这样服务端脚本的默认档位(noesis 的 xhigh 等)保持权威
+    if _THINKING_ENABLED:
+        return {}
+    return {"chat_template_kwargs": {"enable_thinking": False}}
+
+
 def _remote_complete_text(messages, opts):
     """Non-streaming chat completion against 小主机 llama.cpp. Returns content str."""
     info = remote_info()
     payload = {"model": info.get("model") or "local-model",
                "messages": messages, "stream": False}
     payload.update(_remote_opts(opts))
+    payload.update(_remote_template_kwargs())
     req = urllib.request.Request(
         _remote_url("/v1/chat/completions"), method="POST",
         data=json.dumps(payload).encode("utf-8"),
@@ -494,6 +520,7 @@ def _remote_chat_stream(messages, opts):
     payload = {"model": info.get("model") or "local-model",
                "messages": messages, "stream": True}
     payload.update(_remote_opts(opts))
+    payload.update(_remote_template_kwargs())
     req = urllib.request.Request(
         _remote_url("/v1/chat/completions"), method="POST",
         data=json.dumps(payload).encode("utf-8"),
