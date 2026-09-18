@@ -1246,3 +1246,60 @@ register_tool(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Sidebar profile persistence (v3.2)
+# 跨 origin 的配置 / 提示词档案。localStorage 按 (协议,主机,端口) 隔离 —— ComfyUI
+# 端口一变（Windows 保留端口占号后换端口），旧 origin 的预设就读不到。这里把同一份
+# JSON 落盘到 ComfyUI user 目录，换端口 / 换浏览器 / 清缓存后由前端拉回。
+# ---------------------------------------------------------------------------
+_PROFILE_DIR_PARTS = ("default", "llm-sidebar")
+_PROFILE_FILENAME = "profile.json"
+_PROFILE_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+
+
+def get_profile_path() -> str:
+    # 档案路径：<ComfyUI>/user/default/llm-sidebar/profile.json
+    base = folder_paths.get_user_directory()
+    return os.path.join(base, *_PROFILE_DIR_PARTS, _PROFILE_FILENAME)
+
+
+def save_profile(profile) -> dict:
+    # 写入档案（原子写；旧档先留 profile.json.bak）
+    if not isinstance(profile, dict):
+        raise ValueError("profile must be a JSON object")
+    text = json.dumps(profile, ensure_ascii=False)
+    size = len(text.encode("utf-8"))
+    if size > _PROFILE_MAX_BYTES:
+        raise ValueError("profile too large: %d bytes > %d" % (size, _PROFILE_MAX_BYTES))
+    path = get_profile_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                old = f.read()
+            with open(path + ".bak", "w", encoding="utf-8") as f:
+                f.write(old)
+        except Exception as e:  # 备份失败不阻断保存
+            _log.warning("profile backup failed: %s", e)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+    return {"path": path, "bytes": size, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def load_profile() -> dict:
+    # 读取档案；不存在时 exists=False（前端据此决定是否回填）
+    path = get_profile_path()
+    if not os.path.exists(path):
+        return {"exists": False, "path": path}
+    with open(path, "r", encoding="utf-8") as f:
+        profile = json.load(f)
+    st = os.stat(path)
+    return {
+        "exists": True,
+        "path": path,
+        "profile": profile,
+        "bytes": st.st_size,
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+    }

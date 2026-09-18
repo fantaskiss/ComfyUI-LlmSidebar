@@ -352,4 +352,26 @@ def register_routes(prompt_server, llm_module):
         except Exception as e:
             return web.json_response({"success": False, "error": str(e)}, status=400)
 
+    # ---- GET /llm-sidebar/profile ----（跨端口档案：配置 + 提示词预设）
+    @prompt_server.routes.get("/llm-sidebar/profile")
+    async def profile_get_handler(request):
+        try:
+            return web.json_response({"success": True, "data": _llm.load_profile()})
+        except Exception as e:
+            _log.exception("profile get error")
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    # ---- POST /llm-sidebar/profile ----
+    @prompt_server.routes.post("/llm-sidebar/profile")
+    async def profile_post_handler(request):
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or not isinstance(body.get("profile"), dict):
+                return web.json_response(
+                    {"success": False, "error": "body must be {profile: {...}}"}, status=400)
+            return web.json_response({"success": True, "data": _llm.save_profile(body["profile"])})
+        except Exception as e:
+            _log.exception("profile post error")
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
     _log.info("LlmSidebar routes registered")

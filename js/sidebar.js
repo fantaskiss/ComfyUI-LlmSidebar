@@ -88,66 +88,70 @@ const DESCRIBE_PROMPT =
     "complete Chinese translation prefixed with 【中文对照】.";
 
 // ---- persistence ----
+function applyState(s) {
+    selectedModel = s.selectedModel || "";
+    selectedMmproj = s.selectedMmproj || "";
+    selectedHandler = s.selectedHandler || "None";
+    chatHistory = s.chatHistory || [];
+    describeText = s.describeText || "";
+    systemPromptEnabled = s.systemPromptEnabled !== false;
+    // 预设槽：v3.0 结构；旧版单条 systemPrompt 迁移到 chatPresets[0]
+    if (Array.isArray(s.chatPresets) && s.chatPresets.length === 3) {
+        chatPresets = s.chatPresets.map(p => ({ name: (p && p.name) || "", text: (p && p.text) || "" }));
+        chatPresetIdx = (s.chatPresetIdx >= 0 && s.chatPresetIdx < 3) ? s.chatPresetIdx : 0;
+    } else {
+        chatPresets = [
+            { name: "", text: s.systemPrompt || "" },
+            { name: "", text: "" },
+            { name: "", text: "" },
+        ];
+        chatPresetIdx = 0;
+    }
+    if (Array.isArray(s.descPresets) && s.descPresets.length === 3) {
+        descPresets = s.descPresets.map(p => ({ name: (p && p.name) || "", text: (p && p.text) || "" }));
+        descPresetIdx = (s.descPresetIdx >= 0 && s.descPresetIdx < 3) ? s.descPresetIdx : 0;
+    } else {
+        descPresets = [
+            { name: "", text: DESCRIBE_PROMPT },
+            { name: "", text: "" },
+            { name: "", text: "" },
+        ];
+        descPresetIdx = 0;
+    }
+    maxTokens = s.maxTokens || 300;
+    temperature = s.temperature || "";
+    topP = s.topP || "";
+    topK = s.topK || "";
+    repeatPenalty = s.repeatPenalty || "";
+    // Load params
+    nCtx = s.nCtx || 8192;
+    nGpuLayers = s.nGpuLayers != null ? s.nGpuLayers : -1;
+    vramLimit = s.vramLimit != null ? s.vramLimit : -1;
+    cacheTypeK = s.cacheTypeK || "default";
+    cacheTypeV = s.cacheTypeV || "default";
+    nCpuMoe = s.nCpuMoe != null ? s.nCpuMoe : 0;
+    nSeqMax = s.nSeqMax || 1;
+    imageMinTokens = s.imageMinTokens || 1024;
+    imageMaxTokens = s.imageMaxTokens || 4096;
+    backendMode = s.backendMode === "remote" ? "remote" : "local";
+    remoteBaseUrl = s.remoteBaseUrl || "http://10.0.0.8:60000";
+    toolsEnabled = s.toolsEnabled === true;
+    wikiPath = s.wikiPath || "";
+    maxToolRounds = s.maxToolRounds || 10;
+    toolResultMaxChars = s.toolResultMaxChars || 8000;
+    thinkingEnabled = s.thinkingEnabled !== false;
+    genIntent = s.genIntent || "";
+    genWikiPath = s.genWikiPath || s.wikiPath || "";
+}
+
+// 返回 true = 本地（localStorage）有档；false = 本地空（换端口/换浏览器/清缓存）
 function loadState() {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-            const s = JSON.parse(raw);
-            selectedModel = s.selectedModel || "";
-            selectedMmproj = s.selectedMmproj || "";
-            selectedHandler = s.selectedHandler || "None";
-            chatHistory = s.chatHistory || [];
-            describeText = s.describeText || "";
-            systemPromptEnabled = s.systemPromptEnabled !== false;
-            // 预设槽：v3.0 结构；旧版单条 systemPrompt 迁移到 chatPresets[0]
-            if (Array.isArray(s.chatPresets) && s.chatPresets.length === 3) {
-                chatPresets = s.chatPresets.map(p => ({ name: (p && p.name) || "", text: (p && p.text) || "" }));
-                chatPresetIdx = (s.chatPresetIdx >= 0 && s.chatPresetIdx < 3) ? s.chatPresetIdx : 0;
-            } else {
-                chatPresets = [
-                    { name: "", text: s.systemPrompt || "" },
-                    { name: "", text: "" },
-                    { name: "", text: "" },
-                ];
-                chatPresetIdx = 0;
-            }
-            if (Array.isArray(s.descPresets) && s.descPresets.length === 3) {
-                descPresets = s.descPresets.map(p => ({ name: (p && p.name) || "", text: (p && p.text) || "" }));
-                descPresetIdx = (s.descPresetIdx >= 0 && s.descPresetIdx < 3) ? s.descPresetIdx : 0;
-            } else {
-                descPresets = [
-                    { name: "", text: DESCRIBE_PROMPT },
-                    { name: "", text: "" },
-                    { name: "", text: "" },
-                ];
-                descPresetIdx = 0;
-            }
-            maxTokens = s.maxTokens || 300;
-            temperature = s.temperature || "";
-            topP = s.topP || "";
-            topK = s.topK || "";
-            repeatPenalty = s.repeatPenalty || "";
-            // Load params
-            nCtx = s.nCtx || 8192;
-            nGpuLayers = s.nGpuLayers != null ? s.nGpuLayers : -1;
-            vramLimit = s.vramLimit != null ? s.vramLimit : -1;
-            cacheTypeK = s.cacheTypeK || "default";
-            cacheTypeV = s.cacheTypeV || "default";
-            nCpuMoe = s.nCpuMoe != null ? s.nCpuMoe : 0;
-            nSeqMax = s.nSeqMax || 1;
-            imageMinTokens = s.imageMinTokens || 1024;
-            imageMaxTokens = s.imageMaxTokens || 4096;
-            backendMode = s.backendMode === "remote" ? "remote" : "local";
-            remoteBaseUrl = s.remoteBaseUrl || "http://10.0.0.8:60000";
-            toolsEnabled = s.toolsEnabled === true;
-            wikiPath = s.wikiPath || "";
-            maxToolRounds = s.maxToolRounds || 10;
-            toolResultMaxChars = s.toolResultMaxChars || 8000;
-            thinkingEnabled = s.thinkingEnabled !== false;
-            genIntent = s.genIntent || "";
-            genWikiPath = s.genWikiPath || s.wikiPath || "";
-        }
-    } catch (e) {}
+        if (!raw) return false;
+        applyState(JSON.parse(raw));
+        return true;
+    } catch (e) { return false; }
 }
 
 function saveState() {
@@ -174,6 +178,110 @@ function saveState() {
             thinkingEnabled,
             genIntent, genWikiPath,
         }));
+    } catch (e) {}
+    scheduleProfilePush();
+}
+
+// ---- 服务端档案（跨端口 / 跨浏览器）----
+// localStorage 按 origin（协议+主机+端口）隔离；ComfyUI 端口一变（Windows 保留端口占号）
+// 旧 origin 的预设就读不到。这里把同一份 JSON 另存到
+// <ComfyUI>/user/default/llm-sidebar/profile.json，换端口后自动/手动拉回。
+const PROFILE_URL = "/llm-sidebar/profile";
+const PROFILE_PUSH_INTERVAL = 10000;   // 状态变化后最多每 10 秒落盘一次
+let __profilePushTimer = null;
+let __profileDirty = false;
+let __profileSynced = false;           // 拿到过可信档案（本地或服务端）才允许回写
+
+function setProfileStatus(msg) {
+    if (!panel) return;
+    const el = panel.querySelector("#llm-profile-status");
+    if (el) el.textContent = msg || "";
+}
+
+function scheduleProfilePush() {
+    if (!__profileSynced) return;      // 防覆盖：还没拿到可信档案时不回写
+    __profileDirty = true;
+    if (__profilePushTimer) return;
+    __profilePushTimer = setTimeout(() => {
+        __profilePushTimer = null;
+        if (__profileDirty) pushProfile();
+    }, PROFILE_PUSH_INTERVAL);
+}
+
+async function pushProfile(silent) {
+    __profileDirty = false;
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        const resp = await fetch(PROFILE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ profile: JSON.parse(raw) }),
+        });
+        const data = await resp.json();
+        if (data && data.success) {
+            if (!silent) setProfileStatus("已保存 " + ((data.data && data.data.saved_at) || ""));
+        } else if (!silent) {
+            setProfileStatus("保存失败: " + ((data && data.error) || resp.status));
+        }
+    } catch (e) {
+        if (!silent) setProfileStatus("保存失败: " + e.message);
+    }
+}
+
+async function fetchProfile() {
+    const resp = await fetch(PROFILE_URL);
+    const data = await resp.json();
+    if (!data || !data.success) throw new Error((data && data.error) || ("HTTP " + resp.status));
+    return data.data;
+}
+
+// 启动时自动回填：本地无档（换端口/换浏览器/清缓存）→ 用服务端档案
+async function autoPullProfile() {
+    try {
+        const d = await fetchProfile();
+        if (d && d.exists && d.profile) {
+            applyState(d.profile);
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d.profile)); } catch (e) {}
+            console.log("[LlmSidebar] profile restored from server:", d.path);
+            return true;
+        }
+    } catch (e) { /* 服务端不可用：静默，保持默认值且暂停回写 */ }
+    return false;
+}
+
+// Prompt 标签按钮：手动把服务端档案拉回来覆盖当前状态
+async function pullProfileManually() {
+    if (!panel) return;
+    const btn = panel.querySelector("#llm-profile-pull");
+    if (btn) btn.disabled = true;
+    setProfileStatus("拉取中…");
+    try {
+        const d = await fetchProfile();
+        if (!d.exists || !d.profile) {
+            setProfileStatus("服务端没有档案");
+            if (btn) btn.disabled = false;
+            return;
+        }
+        applyState(d.profile);
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d.profile)); } catch (e) {}
+        __profileSynced = true;
+        setProfileStatus("已拉取 " + (d.saved_at || "") + "，刷新页面…");
+        setTimeout(() => location.reload(), 400);
+    } catch (e) {
+        setProfileStatus("拉取失败: " + e.message);
+        if (btn) btn.disabled = false;
+    }
+}
+
+// 页面关闭前补一次未落盘的改动
+function flushProfileOnUnload() {
+    if (!__profileDirty || !__profileSynced) return;
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw || !navigator.sendBeacon) return;
+        const blob = new Blob([JSON.stringify({ profile: JSON.parse(raw) })], { type: "application/json" });
+        navigator.sendBeacon(PROFILE_URL, blob);
     } catch (e) {}
 }
 
@@ -271,6 +379,10 @@ function createPanel() {
         <div style="padding:4px 10px 8px;flex:1;min-height:0;display:flex">
           <textarea id="llm-desc-preset-textarea" placeholder="反推指令：右键图片时发给模型的指令。槽1内置英文生图向描述（含【中文对照】）" style="flex:1;width:100%;box-sizing:border-box;min-height:40px;background:var(--bg-color,#222);color:var(--fg-color,#ddd);border:1px solid var(--border-color,#444);padding:6px;resize:none;font-size:12px;font-family:inherit;border-radius:3px"></textarea>
         </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid var(--border-color,#333);flex-shrink:0">
+        <button id="llm-profile-pull" style="padding:5px 10px;background:#2d4a5e;color:#cfe;border:1px solid #456;border-radius:4px;cursor:pointer;font-size:12px" title="从服务端档案拉取配置与预设（ComfyUI/user/default/llm-sidebar/profile.json），覆盖当前状态。换端口 / 换浏览器 / 清缓存后用它找回">⤓ 从服务端拉取</button>
+        <span id="llm-profile-status" style="font-size:10px;color:#888"></span>
       </div>
     </div>
 
@@ -395,6 +507,8 @@ function bindEvents() {
         }
     };
     panel.querySelector("#llm-close").onclick = togglePanel;
+    const pullBtn = panel.querySelector("#llm-profile-pull");
+    if (pullBtn) pullBtn.onclick = pullProfileManually;
 
     // Chat
     panel.querySelector("#llm-send").onclick = sendMessage;
@@ -1375,7 +1489,15 @@ function createToggleButton() {
             a.registerExtension({
                 name: "ComfyUI.LlmSidebar",
                 async setup() {
-                    loadState();
+                    const __hadLocal = loadState();
+                    if (__hadLocal) {
+                        __profileSynced = true;
+                    } else {
+                        __profileSynced = await autoPullProfile();
+                        if (!__profileSynced) {
+                            console.warn("[LlmSidebar] 服务端档案不可用且本地无档：已暂停自动保存，避免覆盖服务端档案");
+                        }
+                    }
                     createPanel();
                     createToggleButton();
                     refreshModels();
